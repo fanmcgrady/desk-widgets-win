@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -343,12 +344,18 @@ public sealed class MsToDoSync
             w.WriteString("content", ToHtml(local.Body));
             w.WriteString("contentType", "html");
             w.WriteEndObject();
+            // 按「日历日」写入：中国时区当天 00:00，避免 UTC 往返错日
             if (!string.IsNullOrEmpty(local.DueDate) &&
-                DateTime.TryParse(local.DueDate, out var due))
+                DateTime.TryParseExact(
+                    local.DueDate.Trim(),
+                    "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var dueDay))
             {
                 w.WritePropertyName("dueDateTime");
                 w.WriteStartObject();
-                w.WriteString("dateTime", due.ToString("yyyy-MM-dd") + "T00:00:00.0000000");
+                w.WriteString("dateTime", dueDay.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "T00:00:00.0000000");
                 w.WriteString("timeZone", "China Standard Time");
                 w.WriteEndObject();
             }
@@ -375,13 +382,61 @@ public sealed class MsToDoSync
         return System.Net.WebUtility.HtmlDecode(t).Trim();
     }
 
+    private static readonly TimeZoneInfo ChinaTz = ResolveChinaTz();
+
+    private static TimeZoneInfo ResolveChinaTz()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("China Standard Time"); }
+        catch
+        {
+            try { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Shanghai"); }
+            catch { return TimeZoneInfo.Local; }
+        }
+    }
+
+    /// <summary>
+    /// Graph 常把 dueDateTime 以 UTC 返回（例如中国 10-28 00:00 → 10-27T16:00Z）。
+    /// 若直接截取前 10 位会变成前一天；这里统一转成中国时区的日历日。
+    /// </summary>
     private static string? DueFromGraph(JsonElement? due)
     {
         if (due == null || due.Value.ValueKind != JsonValueKind.Object) return null;
         if (!due.Value.TryGetProperty("dateTime", out var dt)) return null;
         var s = dt.GetString();
-        if (string.IsNullOrEmpty(s) || s.Length < 10) return null;
-        return s[..10];
+        if (string.IsNullOrEmpty(s)) return null;
+
+        var tzName = due.Value.TryGetProperty("timeZone", out var tzEl) ? tzEl.GetString() : null;
+
+        if (!DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+            return s.Length >= 10 ? s[..10] : null;
+
+        DateTime utc;
+        if (parsed.Kind == DateTimeKind.Utc)
+            utc = parsed;
+        else if (string.Equals(tzName, "UTC", StringComparison.OrdinalIgnoreCase))
+            utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        else if (!string.IsNullOrEmpty(tzName))
+        {
+            try
+            {
+                var src = TimeZoneInfo.FindSystemTimeZoneById(tzName!);
+                utc = TimeZoneInfo.ConvertTimeToUtc(
+                    DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified), src);
+            }
+            catch
+            {
+                // 无法解析时区时，按 UTC 处理（Graph 常见返回）
+                utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+            }
+        }
+        else
+        {
+            // 无 timeZone、无 Z：仍按 UTC（与 Graph 文档一致）
+            utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        }
+
+        var china = TimeZoneInfo.ConvertTimeFromUtc(utc, ChinaTz);
+        return china.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
     }
 
     private static long ToUnixMs(string? iso)

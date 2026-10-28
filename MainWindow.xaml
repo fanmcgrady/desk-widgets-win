@@ -11,7 +11,8 @@
         AllowsTransparency="False"
         FontFamily="Microsoft YaHei UI"
         FontSize="12"
-        PreviewKeyDown="Window_PreviewKeyDown">
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewMouseDown="Window_PreviewMouseDown">
   <Window.Resources>
     <!-- 覆盖 MD 默认大按钮，侧栏内按钮默认透明文字 -->
     <Style TargetType="Button">
@@ -256,7 +257,9 @@
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
               <TextBlock x:Name="TodoSectionTitle" Text="今日待办"
                          FontWeight="SemiBold" FontSize="12.5"
-                         VerticalAlignment="Center"/>
+                         VerticalAlignment="Center" Cursor="Hand"
+                         MouseLeftButtonUp="TodoSectionTitle_Click"
+                         ToolTip="点击查看全部待办"/>
               <TextBlock x:Name="TodoProgress" Margin="8,0,0,0"
                          Foreground="{StaticResource Muted}" FontSize="11.5"
                          VerticalAlignment="Center"/>
@@ -288,19 +291,20 @@
           <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" Height="24">
             <Button Content="+ 新建" Foreground="{StaticResource Accent}" FontSize="12"
                     Click="BtnNewNote_Click"/>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-              <Button x:Name="BtnAddTodoFromNote" Content="加入代办"
-                      Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
-                      Click="BtnAddTodoFromNote_Click"/>
-              <Button Content="记事本" Foreground="{StaticResource Muted}" FontSize="12"
-                      Click="BtnNotepad_Click"/>
-            </StackPanel>
+            <Button x:Name="BtnAddTodoFromNote" Content="加入代办"
+                    HorizontalAlignment="Right"
+                    Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
+                    Click="BtnAddTodoFromNote_Click"/>
           </DockPanel>
           <ScrollViewer x:Name="NoteListHost" DockPanel.Dock="Top" Height="26"
                         HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
                         Margin="0,0,0,6">
             <StackPanel x:Name="NoteList" Orientation="Horizontal"/>
           </ScrollViewer>
+          <Button x:Name="BtnNotepad" DockPanel.Dock="Bottom"
+                  Content="用记事本打开" Style="{StaticResource PrimaryBtn}"
+                  Height="34" Margin="0,8,0,0" FontSize="13"
+                  Click="BtnNotepad_Click"/>
           <Border Background="White" CornerRadius="8" Padding="10,8"
                   BorderBrush="#10000000" BorderThickness="1">
             <TextBox x:Name="NoteEdit"
@@ -371,15 +375,16 @@
                         Click="BtnMailReply_Click"/>
               </DockPanel>
               <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
-                      Padding="12,12">
+                      Padding="16,14">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                  <StackPanel>
-                    <TextBlock x:Name="MailReadSubject" FontSize="14" FontWeight="SemiBold"
-                               TextWrapping="Wrap" Margin="0,0,0,6"/>
-                    <TextBlock x:Name="MailReadMeta" FontSize="11.5"
-                               Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12"/>
-                    <TextBlock x:Name="MailReadBody" FontSize="12.5" TextWrapping="Wrap"
-                               LineHeight="20"/>
+                  <StackPanel MaxWidth="720" HorizontalAlignment="Left">
+                    <TextBlock x:Name="MailReadSubject" FontSize="16" FontWeight="SemiBold"
+                               TextWrapping="Wrap" Margin="0,0,0,8"/>
+                    <TextBlock x:Name="MailReadMeta" FontSize="12"
+                               Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                    <StackPanel x:Name="MailReadAttachments" Margin="0,0,0,12"/>
+                    <TextBlock x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
+                               LineHeight="22"/>
                   </StackPanel>
                 </ScrollViewer>
               </Border>

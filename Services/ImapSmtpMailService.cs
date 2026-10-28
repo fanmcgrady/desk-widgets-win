@@ -1,4 +1,4 @@
-using System.Text;
+using System.IO;
 using System.Text.RegularExpressions;
 using MailKit;
 using MailKit.Net.Imap;
@@ -20,6 +20,14 @@ public sealed class MailMessageSummary
     public bool IsRead { get; init; }
 }
 
+public sealed class MailAttachmentInfo
+{
+    public int Index { get; init; }
+    public string FileName { get; init; } = "附件";
+    public long Size { get; init; }
+    public string ContentType { get; init; } = "";
+}
+
 public sealed class MailMessageDetail
 {
     public string Id { get; init; } = "";
@@ -30,6 +38,7 @@ public sealed class MailMessageDetail
     public string To { get; init; } = "";
     public string BodyText { get; init; } = "";
     public DateTimeOffset? Received { get; init; }
+    public IReadOnlyList<MailAttachmentInfo> Attachments { get; init; } = Array.Empty<MailAttachmentInfo>();
 }
 
 public sealed class ImapSmtpMailService
@@ -106,6 +115,7 @@ public sealed class ImapSmtpMailService
         if (string.IsNullOrWhiteSpace(body))
             body = StripHtml(msg.HtmlBody ?? "");
 
+        var attachments = ListAttachments(msg);
         var detail = new MailMessageDetail
         {
             Id = uid.ToString(),
@@ -116,10 +126,97 @@ public sealed class ImapSmtpMailService
             To = string.Join(", ", msg.To.Mailboxes.Select(FormatMailbox)),
             BodyText = body?.Trim() ?? "",
             Received = msg.Date,
+            Attachments = attachments,
         };
 
         await client.DisconnectAsync(true, ct).ConfigureAwait(false);
         return detail;
+    }
+
+    public async Task SaveAttachmentAsync(UniqueId uid, int attachmentIndex, string savePath, CancellationToken ct = default)
+    {
+        EnsureConfigured();
+        using var client = await ConnectImapAsync(ct).ConfigureAwait(false);
+        var inbox = client.Inbox;
+        await inbox.OpenAsync(FolderAccess.ReadOnly, ct).ConfigureAwait(false);
+        var msg = await inbox.GetMessageAsync(uid, ct).ConfigureAwait(false);
+        var parts = CollectAttachmentParts(msg);
+        if (attachmentIndex < 0 || attachmentIndex >= parts.Count)
+            throw new InvalidOperationException("附件不存在或已失效。");
+
+        var part = parts[attachmentIndex];
+        await using (var fs = File.Create(savePath))
+        {
+            if (part.Content == null)
+                throw new InvalidOperationException("附件内容为空。");
+            await part.Content.DecodeToAsync(fs, ct).ConfigureAwait(false);
+        }
+
+        await client.DisconnectAsync(true, ct).ConfigureAwait(false);
+    }
+
+    private static IReadOnlyList<MailAttachmentInfo> ListAttachments(MimeMessage msg)
+    {
+        var parts = CollectAttachmentParts(msg);
+        var list = new List<MailAttachmentInfo>(parts.Count);
+        for (var i = 0; i < parts.Count; i++)
+        {
+            var p = parts[i];
+            var name = p.FileName;
+            if (string.IsNullOrWhiteSpace(name))
+                name = $"attachment-{i + 1}";
+            long size = 0;
+            try
+            {
+                // 优先 ContentDisposition 声明的大小
+                if (p.ContentDisposition?.Size != null)
+                    size = p.ContentDisposition.Size.Value;
+            }
+            catch { /* ignore */ }
+            list.Add(new MailAttachmentInfo
+            {
+                Index = i,
+                FileName = name,
+                Size = size,
+                ContentType = p.ContentType?.MimeType ?? "",
+            });
+        }
+        return list;
+    }
+
+    private static List<MimePart> CollectAttachmentParts(MimeMessage msg)
+    {
+        var parts = new List<MimePart>();
+        foreach (var part in msg.BodyParts.OfType<MimePart>())
+        {
+            // 正文 text/html、text/plain 且非附件 → 跳过
+            var isTextBody = part.ContentType.IsMimeType("text", "plain")
+                             || part.ContentType.IsMimeType("text", "html");
+            if (isTextBody && !part.IsAttachment)
+                continue;
+
+            // 有文件名、标记为附件，或非纯文本的 body part
+            if (part.IsAttachment
+                || !string.IsNullOrWhiteSpace(part.FileName)
+                || (!isTextBody && part.ContentDisposition?.Disposition == ContentDisposition.Attachment))
+            {
+                parts.Add(part);
+                continue;
+            }
+
+            // 常见：application/*、image/* 内嵌也当作可下载附件列出（有文件名时）
+            if (!isTextBody && !string.IsNullOrWhiteSpace(part.FileName))
+                parts.Add(part);
+        }
+
+        // 有些信只在 Attachments 集合里
+        if (parts.Count == 0)
+        {
+            foreach (var ent in msg.Attachments.OfType<MimePart>())
+                parts.Add(ent);
+        }
+
+        return parts;
     }
 
     public async Task SendAsync(string to, string subject, string body, CancellationToken ct = default)

@@ -25,6 +25,8 @@ namespace DeskWidgets;
 public partial class MainWindow : Window
 {
     private const double PanelWidthDip = 320;
+    /// <summary>阅读/写信时临时加宽，减轻侧栏窄屏读长文的问题。</summary>
+    private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 8;
 
     private enum TabMode { Note, Todo, Mail }
@@ -44,9 +46,17 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _edgeTimer;
     private readonly DispatcherTimer _syncTimer;
     private readonly DispatcherTimer _mailPollTimer;
+    private DispatcherTimer? _displayDebounce;
     private WinForms.NotifyIcon? _tray;
+    private DrawingIcon? _trayIcon;
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
+    /// <summary>投屏/分辨率抖动期间禁止自动换屏，避免侧栏跳来跳去。</summary>
+    private DateTime _dockLockUntilUtc = DateTime.MinValue;
+    private int _lastPlaceX = int.MinValue;
+    private int _lastPlaceY = int.MinValue;
+    private int _lastPlaceW = int.MinValue;
+    private int _lastPlaceH = int.MinValue;
 
     private bool _expanded;
     private bool _allowClose;
@@ -134,13 +144,37 @@ public partial class MainWindow : Window
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
+        // 投屏时 DisplaySettingsChanged 会连打多次，合并成一次再重定位
         Dispatcher.BeginInvoke(() =>
         {
-            _dockScreen = ResolveScreen(_dockScreen) ?? PickDefaultDockScreen();
-            if (_expanded) PlaceExpanded();
-            else PlaceCollapsed();
+            _displayDebounce ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
+            _displayDebounce.Stop();
+            _displayDebounce.Tick -= OnDisplayDebounceTick;
+            _displayDebounce.Tick += OnDisplayDebounceTick;
+            _displayDebounce.Start();
+            // 抖动期内先锁停靠屏，EdgeTimer 不换屏、不因坐标乱跳而乱展开
+            _dockLockUntilUtc = DateTime.UtcNow.AddSeconds(5);
         });
     }
+
+    private void OnDisplayDebounceTick(object? sender, EventArgs e)
+    {
+        _displayDebounce?.Stop();
+        _dockLockUntilUtc = DateTime.UtcNow.AddSeconds(3);
+
+        // 尽量留在原屏；原屏没了才退回主屏（比「最右侧」在投屏时更稳）
+        var resolved = ResolveScreen(_dockScreen);
+        _dockScreen = resolved
+                      ?? WinForms.Screen.PrimaryScreen
+                      ?? PickDefaultDockScreen();
+
+        // 强制重放一次（忽略上次坐标缓存）
+        _lastPlaceX = int.MinValue;
+        if (_expanded) PlaceExpanded();
+        else PlaceCollapsed();
+    }
+
+    private bool IsDockLocked() => DateTime.UtcNow < _dockLockUntilUtc;
 
     // ----- multi-monitor dock (physical pixels + MoveWindow) -----
     [DllImport("user32.dll", SetLastError = true)]
@@ -211,20 +245,49 @@ public partial class MainWindow : Window
             helper.EnsureHandle();
     }
 
+    /// <summary>当前侧栏目标宽度：邮件阅读/写信用宽版，其余用窄版。</summary>
+    private double ActivePanelWidthDip
+    {
+        get
+        {
+            if (_tab == TabMode.Mail && _mailView is MailView.Read or MailView.Compose)
+                return PanelWidthMailDip;
+            return PanelWidthDip;
+        }
+    }
+
     private void PlaceOnScreen(WinForms.Screen screen, bool expanded)
     {
         _dockScreen = screen;
         EnsureHwnd();
         var hwnd = new WindowInteropHelper(this).Handle;
         var scale = DpiScale(screen);
-        var widthPx = Math.Max(1, (int)Math.Round(PanelWidthDip * scale));
+        var dipW = expanded ? ActivePanelWidthDip : PanelWidthDip;
+        // 宽屏不超过工作区约 55%，避免小笔记本被占满
+        var maxDip = screen.WorkingArea.Width / scale * 0.55;
+        if (dipW > maxDip) dipW = Math.Max(PanelWidthDip, maxDip);
+        var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
         var wa = screen.WorkingArea;
         var x = expanded ? wa.Right - widthPx : wa.Right;
         var y = wa.Top;
         var h = Math.Max(1, wa.Height);
 
+        // 坐标未变则跳过 MoveWindow，减少投屏时闪跳
+        if (x == _lastPlaceX && y == _lastPlaceY && widthPx == _lastPlaceW && h == _lastPlaceH
+            && Math.Abs(Width - dipW) < 0.5)
+        {
+            Opacity = 1;
+            if (expanded) Show();
+            return;
+        }
+
+        _lastPlaceX = x;
+        _lastPlaceY = y;
+        _lastPlaceW = widthPx;
+        _lastPlaceH = h;
+
         // WPF 尺寸用 DIP；实际位置用像素 MoveWindow，避免多屏 DPI 错位
-        Width = PanelWidthDip;
+        Width = dipW;
         Height = h / scale;
         MoveWindow(hwnd, x, y, widthPx, h, true);
         Opacity = 1;
@@ -233,13 +296,17 @@ public partial class MainWindow : Window
 
     private void PlaceExpanded()
     {
-        var screen = ResolveScreen(_dockScreen) ?? PickDefaultDockScreen();
+        var screen = ResolveScreen(_dockScreen)
+                     ?? WinForms.Screen.PrimaryScreen
+                     ?? PickDefaultDockScreen();
         PlaceOnScreen(screen, expanded: true);
     }
 
     private void PlaceCollapsed()
     {
-        var screen = ResolveScreen(_dockScreen) ?? PickDefaultDockScreen();
+        var screen = ResolveScreen(_dockScreen)
+                     ?? WinForms.Screen.PrimaryScreen
+                     ?? PickDefaultDockScreen();
         PlaceOnScreen(screen, expanded: false);
     }
 
@@ -273,21 +340,32 @@ public partial class MainWindow : Window
     {
         var mouse = WinForms.Control.MousePosition; // 物理像素
         var edgeScreen = ScreenNearRightEdge(mouse);
+        var dockLocked = IsDockLocked();
 
         if (!_expanded)
         {
-            if (edgeScreen != null)
+            if (edgeScreen == null) return;
+            // 投屏抖动时：只响应当前停靠屏（或尚无停靠时的主屏）右缘，避免跳到虚拟/镜像屏
+            if (dockLocked)
             {
-                _dockScreen = edgeScreen;
-                _awaitPanelEnter = false;
-                Expand();
+                var prefer = ResolveScreen(_dockScreen) ?? WinForms.Screen.PrimaryScreen;
+                if (prefer != null && edgeScreen.DeviceName != prefer.DeviceName)
+                    return;
             }
+            _dockScreen = edgeScreen;
+            _awaitPanelEnter = false;
+            Expand();
             return;
         }
 
-        var screen = ResolveScreen(_dockScreen) ?? PickDefaultDockScreen();
+        var screen = ResolveScreen(_dockScreen)
+                     ?? WinForms.Screen.PrimaryScreen
+                     ?? PickDefaultDockScreen();
         var scale = DpiScale(screen);
-        var widthPx = Math.Max(1, (int)Math.Round(PanelWidthDip * scale));
+        var dipW = ActivePanelWidthDip;
+        var maxDip = screen.WorkingArea.Width / scale * 0.55;
+        if (dipW > maxDip) dipW = Math.Max(PanelWidthDip, maxDip);
+        var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
         var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
         var wa = screen.WorkingArea;
 
@@ -296,8 +374,10 @@ public partial class MainWindow : Window
         bool inPanel = mouse.X >= wa.Right - widthPx && mouse.X <= wa.Right
                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
 
-        // 鼠标到了另一块屏的右缘：切换停靠屏
-        if (edgeScreen != null && edgeScreen.DeviceName != screen.DeviceName)
+        // 鼠标到了另一块屏的右缘：切换停靠屏（投屏锁定期间禁止，防止乱跳）
+        if (!dockLocked
+            && edgeScreen != null
+            && edgeScreen.DeviceName != screen.DeviceName)
         {
             _dockScreen = edgeScreen;
             PlaceExpanded();
@@ -313,6 +393,13 @@ public partial class MainWindow : Window
                 _leaveSince = null;
             }
             return; // 尚未进过侧栏：保持展开
+        }
+
+        // 投屏抖动时坐标常瞬移出屏，加长离开判定，避免侧栏自己收起又展开
+        if (dockLocked)
+        {
+            _leaveSince = null;
+            return;
         }
 
         if (_inputFocused || inPanel || nearEdge)
@@ -347,21 +434,58 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // 邮件阅读：Backspace / 浏览器后退键 → 返回列表
+        if (!_inputFocused
+            && _tab == TabMode.Mail
+            && _mailView == MailView.Read
+            && (e.Key == Key.Back || e.Key == Key.BrowserBack))
+        {
+            BtnMailBack_Click(sender, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key != Key.Escape) return;
         if (_inputFocused) return;
+        // 阅读中优先返回列表，而不是直接收起侧栏
+        if (_tab == TabMode.Mail && _mailView == MailView.Read)
+        {
+            BtnMailBack_Click(sender, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
         Collapse();
+        e.Handled = true;
+    }
+
+    /// <summary>鼠标侧键回退（XButton1）在阅读邮件时返回列表。</summary>
+    private void Window_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.XButton1) return;
+        if (_tab != TabMode.Mail || _mailView != MailView.Read) return;
+        BtnMailBack_Click(sender, new RoutedEventArgs());
         e.Handled = true;
     }
 
     private void SetupTray()
     {
+        _trayIcon?.Dispose();
+        _trayIcon = CreateTrayIcon();
         _tray = new WinForms.NotifyIcon
         {
-            Icon = CreateTrayIcon(),
+            Icon = _trayIcon,
             Visible = true,
-            Text = "桌面侧栏",
+            Text = "方老师的桌面工作台",
         };
-        var menu = new WinForms.ContextMenuStrip();
+        var menu = new WinForms.ContextMenuStrip
+        {
+            Font = new System.Drawing.Font("Microsoft YaHei UI", 9f),
+            ShowImageMargin = false,
+            RenderMode = WinForms.ToolStripRenderMode.Professional,
+            BackColor = DrawingColor.FromArgb(255, 250, 250, 250),
+            ForeColor = DrawingColor.FromArgb(255, 28, 27, 31),
+        };
+        menu.Renderer = new TrayMenuRenderer();
         menu.Items.Add("展开侧栏", null, (_, _) => Dispatcher.Invoke(ExpandFromTray));
         menu.Items.Add("收起侧栏", null, (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator());
@@ -373,6 +497,7 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(UpdateSyncHint);
         });
         menu.Items.Add(new WinForms.ToolStripSeparator());
+        menu.Items.Add("邮箱设置", null, (_, _) => Dispatcher.Invoke(OpenMailSettingsFromTray));
         var auto = new WinForms.ToolStripMenuItem("开机自启")
         {
             Checked = Autostart.IsEnabled(),
@@ -400,16 +525,109 @@ public partial class MainWindow : Window
         _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ExpandFromTray);
     }
 
+    /// <summary>与主界面一致的紫色日历托盘图标（Accent #6750A4 / Soft #E8DEF8）。</summary>
     private static DrawingIcon CreateTrayIcon()
     {
-        using var bmp = new System.Drawing.Bitmap(32, 32);
+        var bmp = new System.Drawing.Bitmap(32, 32);
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             g.Clear(DrawingColor.Transparent);
-            using var brush = new System.Drawing.SolidBrush(DrawingColor.FromArgb(0, 120, 212));
-            g.FillRectangle(brush, 18, 4, 10, 24);
+
+            var soft = DrawingColor.FromArgb(232, 222, 248);   // AccentSoft
+            var accent = DrawingColor.FromArgb(103, 80, 164);  // Accent
+            var white = DrawingColor.White;
+
+            using (var softBrush = new System.Drawing.SolidBrush(soft))
+                FillRoundRect(g, softBrush, 1, 1, 30, 30, 8);
+
+            // 日历外框
+            using (var accentBrush = new System.Drawing.SolidBrush(accent))
+                FillRoundRect(g, accentBrush, 7, 9, 18, 17, 4);
+
+            // 顶部装订条
+            using (var bar = new System.Drawing.SolidBrush(DrawingColor.FromArgb(232, 222, 248)))
+                g.FillRectangle(bar, 7, 9, 18, 5);
+
+            // 装订环
+            using (var ring = new System.Drawing.SolidBrush(accent))
+            {
+                g.FillEllipse(ring, 10, 6, 4, 5);
+                g.FillEllipse(ring, 18, 6, 4, 5);
+            }
+
+            // 日期格（白点），其中一格高亮表示「今天」
+            using (var cell = new System.Drawing.SolidBrush(DrawingColor.FromArgb(230, 255, 255, 255)))
+            {
+                g.FillRectangle(cell, 10, 16, 3, 3);
+                g.FillRectangle(cell, 15, 16, 3, 3);
+                g.FillRectangle(cell, 20, 16, 3, 3);
+                g.FillRectangle(cell, 10, 21, 3, 3);
+                g.FillRectangle(cell, 20, 21, 3, 3);
+            }
+            using (var today = new System.Drawing.SolidBrush(white))
+                g.FillRectangle(today, 15, 21, 3, 3);
         }
-        return DrawingIcon.FromHandle(bmp.GetHicon());
+
+        // Clone 后释放 HICON，避免句柄泄漏；保留 bmp 直到 Icon 持有像素
+        var hIcon = bmp.GetHicon();
+        try
+        {
+            using var tmp = DrawingIcon.FromHandle(hIcon);
+            return (DrawingIcon)tmp.Clone();
+        }
+        finally
+        {
+            DestroyIcon(hIcon);
+            bmp.Dispose();
+        }
+    }
+
+    private static void FillRoundRect(System.Drawing.Graphics g, System.Drawing.Brush brush, int x, int y, int w, int h, int r)
+    {
+        using var path = new System.Drawing.Drawing2D.GraphicsPath();
+        int d = r * 2;
+        path.AddArc(x, y, d, d, 180, 90);
+        path.AddArc(x + w - d, y, d, d, 270, 90);
+        path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+        path.AddArc(x, y + h - d, d, d, 90, 90);
+        path.CloseFigure();
+        g.FillPath(brush, path);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool DestroyIcon(IntPtr handle);
+
+    /// <summary>托盘菜单：悬停用主界面紫色软底。</summary>
+    private sealed class TrayMenuRenderer : WinForms.ToolStripProfessionalRenderer
+    {
+        public TrayMenuRenderer() : base(new TrayColorTable()) { }
+
+        protected override void OnRenderItemText(WinForms.ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextFont = new System.Drawing.Font("Microsoft YaHei UI", 9f);
+            base.OnRenderItemText(e);
+        }
+    }
+
+    private sealed class TrayColorTable : WinForms.ProfessionalColorTable
+    {
+        private static readonly DrawingColor Soft = DrawingColor.FromArgb(232, 222, 248);
+        private static readonly DrawingColor SoftHover = DrawingColor.FromArgb(220, 210, 240);
+        private static readonly DrawingColor Bg = DrawingColor.FromArgb(250, 250, 250);
+
+        public override DrawingColor MenuItemSelected => SoftHover;
+        public override DrawingColor MenuItemSelectedGradientBegin => Soft;
+        public override DrawingColor MenuItemSelectedGradientEnd => SoftHover;
+        public override DrawingColor MenuItemBorder => DrawingColor.FromArgb(103, 80, 164);
+        public override DrawingColor MenuBorder => DrawingColor.FromArgb(40, 0, 0, 0);
+        public override DrawingColor ToolStripDropDownBackground => Bg;
+        public override DrawingColor ImageMarginGradientBegin => Bg;
+        public override DrawingColor ImageMarginGradientMiddle => Bg;
+        public override DrawingColor ImageMarginGradientEnd => Bg;
+        public override DrawingColor SeparatorDark => DrawingColor.FromArgb(30, 0, 0, 0);
+        public override DrawingColor SeparatorLight => DrawingColor.FromArgb(20, 0, 0, 0);
     }
 
     private void Quit()
@@ -420,12 +638,19 @@ public partial class MainWindow : Window
         _edgeTimer.Stop();
         _syncTimer.Stop();
         _mailPollTimer.Stop();
+        if (_displayDebounce != null)
+        {
+            _displayDebounce.Stop();
+            _displayDebounce.Tick -= OnDisplayDebounceTick;
+        }
         if (_tray != null)
         {
             _tray.Visible = false;
             _tray.Dispose();
             _tray = null;
         }
+        _trayIcon?.Dispose();
+        _trayIcon = null;
         _allowClose = true;
         Close();
         System.Windows.Application.Current.Shutdown();
@@ -601,8 +826,21 @@ public partial class MainWindow : Window
         RefreshNoteChipTitlesIfNeeded();
         ExitTodoEditMode();
         _tab = TabMode.Todo;
-        _filterByDay = false;
+        ShowAllTodos();
         StyleTabs();
+    }
+
+    private void TodoSectionTitle_Click(object sender, MouseButtonEventArgs e)
+    {
+        ExitTodoEditMode();
+        ShowAllTodos();
+        e.Handled = true;
+    }
+
+    /// <summary>取消按日筛选，列表与「待办事项」页签一致显示全部。</summary>
+    private void ShowAllTodos()
+    {
+        _filterByDay = false;
         RebuildCalendar();
         UpdateDueHint();
         UpdateTodoPlaceholder();
@@ -650,6 +888,8 @@ public partial class MainWindow : Window
 
     private void ShowMailView(MailView view)
     {
+        var wasWide = _mailView is MailView.Read or MailView.Compose;
+        var willWide = view is MailView.Read or MailView.Compose;
         _mailView = view;
         MailListHost.Visibility = view == MailView.List ? Visibility.Visible : Visibility.Collapsed;
         MailReadHost.Visibility = view == MailView.Read ? Visibility.Visible : Visibility.Collapsed;
@@ -669,9 +909,21 @@ public partial class MainWindow : Window
         Paint(MailTabInbox, MailTabInboxText, view is MailView.List or MailView.Read);
         Paint(MailTabCompose, MailTabComposeText, view == MailView.Compose);
         Paint(MailTabSettings, MailTabSettingsText, view == MailView.Settings);
+        UpdateMailSettingsTabVisibility();
 
         if (view == MailView.Compose)
             UpdateMailComposeHints();
+
+        // 阅读/写信加宽，列表/设置收回窄栏
+        if (_expanded) PlaceExpanded();
+
+        // 宽→窄时，鼠标常还停在「原来宽出来的区域」，会被当成离开而收起。
+        // 收窄后先锁住自动隐藏，等鼠标再次进入侧栏再恢复。
+        if (wasWide && !willWide && _expanded)
+        {
+            _awaitPanelEnter = true;
+            _leaveSince = null;
+        }
     }
 
     private void MailTabInbox_Click(object sender, MouseButtonEventArgs e)
@@ -711,6 +963,29 @@ public partial class MainWindow : Window
         ShowMailView(MailView.Settings);
         LoadMailSettingsForm();
         SetMailStatus(null);
+    }
+
+    /// <summary>已配置邮箱后隐藏「设置」页签，改由托盘菜单进入。</summary>
+    private void UpdateMailSettingsTabVisibility()
+    {
+        _mail.Reload();
+        var showTab = !_mail.Config.IsConfigured || _mailView == MailView.Settings;
+        MailTabSettings.Visibility = showTab ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OpenMailSettingsFromTray()
+    {
+        ExpandFromTray();
+        FlushNoteSave();
+        RefreshNoteChipTitlesIfNeeded();
+        ExitTodoEditMode();
+        _tab = TabMode.Mail;
+        StyleTabs();
+        ShowMailView(MailView.Settings);
+        LoadMailSettingsForm();
+        SetMailStatus(null);
+        // 托盘进入设置时强制显示页签，方便看到当前位置
+        MailTabSettings.Visibility = Visibility.Visible;
     }
 
     private void MailComposeField_TextChanged(object sender, TextChangedEventArgs e)
@@ -783,6 +1058,7 @@ public partial class MainWindow : Window
             SetMailStatus("连接成功，已保存");
             MailCfgPassword.Password = "";
             ShowMailView(MailView.List);
+            UpdateMailSettingsTabVisibility();
             await ReloadMailInboxAsync(force: true);
         }
         catch (Exception ex)
@@ -926,7 +1202,9 @@ public partial class MainWindow : Window
         MailInboxBadge.Visibility = show;
 
         if (_tray != null)
-            _tray.Text = _mailUnread > 0 ? $"桌面侧栏 · 未读邮件 {_mailUnread}" : "桌面侧栏";
+            _tray.Text = _mailUnread > 0
+                ? $"方老师的桌面工作台 · 未读 {_mailUnread}"
+                : "方老师的桌面工作台";
     }
 
     private UIElement BuildMailRow(MailMessageSummary m)
@@ -935,10 +1213,14 @@ public partial class MainWindow : Window
         var fg = (MediaBrush)FindResource("Fg");
         var hover = (MediaBrush)FindResource("Hover");
         var line = (MediaBrush)FindResource("Line");
+        // 未读：浅紫底；已读：透明
+        MediaBrush idleBg = m.IsRead
+            ? MediaBrushes.Transparent
+            : new SolidColorBrush(MediaColor.FromArgb(0x1A, 0x67, 0x50, 0xA4));
 
         var row = new Border
         {
-            Background = MediaBrushes.Transparent,
+            Background = idleBg,
             BorderBrush = line,
             BorderThickness = new Thickness(0, 0, 0, 1),
             Padding = new Thickness(10, 10, 8, 10),
@@ -946,7 +1228,7 @@ public partial class MainWindow : Window
             Tag = m,
         };
         row.MouseEnter += (_, _) => row.Background = hover;
-        row.MouseLeave += (_, _) => row.Background = MediaBrushes.Transparent;
+        row.MouseLeave += (_, _) => row.Background = idleBg;
         row.MouseLeftButtonUp += async (_, _) =>
         {
             if (row.Tag is MailMessageSummary s)
@@ -1003,8 +1285,9 @@ public partial class MainWindow : Window
                 meta += $"\n时间 {detail.Received.Value.ToLocalTime():yyyy-MM-dd HH:mm}";
             MailReadMeta.Text = meta;
             MailReadBody.Text = string.IsNullOrWhiteSpace(detail.BodyText) ? "（无正文）" : detail.BodyText;
+            RenderMailAttachments(detail);
             ShowMailView(MailView.Read);
-            SetMailStatus(null);
+            SetMailStatus(detail.Attachments.Count > 0 ? $"附件 {detail.Attachments.Count} 个" : null);
             // 缓存里标已读，避免返回列表又整页重拉
             for (var i = 0; i < _mailCache.Count; i++)
             {
@@ -1035,9 +1318,112 @@ public partial class MainWindow : Window
         finally { _mailBusy = false; }
     }
 
+    private void RenderMailAttachments(MailMessageDetail detail)
+    {
+        MailReadAttachments.Children.Clear();
+        if (detail.Attachments.Count == 0) return;
+
+        MailReadAttachments.Children.Add(new TextBlock
+        {
+            Text = $"附件（{detail.Attachments.Count}）",
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 6),
+        });
+
+        var accent = (MediaBrush)FindResource("Accent");
+        var muted = (MediaBrush)FindResource("Muted");
+        foreach (var att in detail.Attachments)
+        {
+            var row = new Border
+            {
+                Background = new SolidColorBrush(MediaColor.FromArgb(0x10, 0x67, 0x50, 0xA4)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(10, 8, 10, 8),
+                Margin = new Thickness(0, 0, 0, 6),
+            };
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var sizeText = att.Size > 0 ? FormatBytes(att.Size) : "";
+            var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            left.Children.Add(new TextBlock
+            {
+                Text = att.FileName,
+                FontSize = 12.5,
+                TextWrapping = TextWrapping.Wrap,
+            });
+            if (!string.IsNullOrEmpty(sizeText))
+            {
+                left.Children.Add(new TextBlock
+                {
+                    Text = sizeText,
+                    FontSize = 11,
+                    Foreground = muted,
+                    Margin = new Thickness(0, 2, 0, 0),
+                });
+            }
+            Grid.SetColumn(left, 0);
+
+            var saveBtn = new WpfButton
+            {
+                Content = "下载",
+                Style = (Style)FindResource("MailActionBtn"),
+                Tag = att,
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var captureUid = detail.Uid;
+            saveBtn.Click += async (_, _) =>
+            {
+                if (saveBtn.Tag is not MailAttachmentInfo info) return;
+                await DownloadMailAttachmentAsync(captureUid, info);
+            };
+            Grid.SetColumn(saveBtn, 1);
+
+            grid.Children.Add(left);
+            grid.Children.Add(saveBtn);
+            row.Child = grid;
+            MailReadAttachments.Children.Add(row);
+        }
+    }
+
+    private async Task DownloadMailAttachmentAsync(MailKit.UniqueId uid, MailAttachmentInfo att)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            FileName = att.FileName,
+            Title = "保存附件",
+            Filter = "所有文件|*.*",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        SetMailStatus("正在下载 " + att.FileName + "…");
+        try
+        {
+            var path = dlg.FileName;
+            await Task.Run(async () => await _mail.SaveAttachmentAsync(uid, att.Index, path));
+            SetMailStatus("已保存：" + path);
+            try { Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true }); }
+            catch { /* 打开失败就算了 */ }
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("下载失败：" + ShortErr(ex));
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024.0).ToString("0.#") + " KB";
+        return (bytes / (1024.0 * 1024.0)).ToString("0.##") + " MB";
+    }
+
     private void BtnMailBack_Click(object sender, RoutedEventArgs e)
     {
-        // 返回只渲染缓存，不重新联网
+        // 返回只渲染缓存；ShowMailView 会处理宽→窄后的误收起
         ShowMailView(MailView.List);
         if (_mailCache.Count > 0)
         {
@@ -1181,6 +1567,7 @@ public partial class MainWindow : Window
             TodoSectionTitle.Text = $"{_selected:MM-dd} 待办";
         else
             TodoSectionTitle.Text = "全部待办";
+        TodoSectionTitle.ToolTip = _filterByDay ? "点击查看全部待办" : null;
     }
 
     private void BtnAddTodo_Click(object sender, RoutedEventArgs e) => CommitTodoInput();
@@ -1310,22 +1697,51 @@ public partial class MainWindow : Window
         Grid.SetColumn(check, 0);
         Grid.SetRow(check, 0);
 
+        var titleHost = new Grid
+        {
+            Margin = new Thickness(10, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
         var title = new TextBlock
         {
             Text = todo.Title,
             TextWrapping = TextWrapping.Wrap,
             FontSize = 13.5,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(10, 0, 8, 0),
             Foreground = todo.Done ? muted : fg,
             TextDecorations = todo.Done ? TextDecorations.Strikethrough : null,
-            Cursor = !string.IsNullOrWhiteSpace(todo.Body) ? WpfCursors.Hand : WpfCursors.Arrow,
+            Cursor = WpfCursors.Hand,
+            ToolTip = "单击编辑",
         };
-        if (!string.IsNullOrWhiteSpace(todo.Body))
-            title.MouseLeftButtonUp += (_, _) => OpenTodoInNotes(todo.Id);
-        Grid.SetColumn(title, 1);
-        Grid.SetRow(title, 0);
+        title.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            BeginInlineTodoEdit(todo, titleHost, title);
+        };
+        titleHost.Children.Add(title);
+        Grid.SetColumn(titleHost, 1);
+        Grid.SetRow(titleHost, 0);
 
+        var actions = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var edit = new TextBlock
+        {
+            Text = "编辑",
+            FontSize = 11.5,
+            Foreground = accent,
+            Cursor = WpfCursors.Hand,
+            Padding = new Thickness(6, 0, 4, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "编辑标题与备注",
+        };
+        edit.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            OpenTodoInNotes(todo.Id);
+        };
         var del = new TextBlock
         {
             Text = "×",
@@ -1333,7 +1749,7 @@ public partial class MainWindow : Window
             Foreground = muted,
             Opacity = 0.45,
             Cursor = WpfCursors.Hand,
-            Padding = new Thickness(8, 0, 2, 0),
+            Padding = new Thickness(4, 0, 2, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Tag = todo.Id,
             ToolTip = "删除",
@@ -1346,12 +1762,14 @@ public partial class MainWindow : Window
             ReloadTodos();
             _ = TrySyncSilentAsync();
         };
-        Grid.SetColumn(del, 2);
-        Grid.SetRow(del, 0);
+        actions.Children.Add(edit);
+        actions.Children.Add(del);
+        Grid.SetColumn(actions, 2);
+        Grid.SetRow(actions, 0);
 
         grid.Children.Add(check);
-        grid.Children.Add(title);
-        grid.Children.Add(del);
+        grid.Children.Add(titleHost);
+        grid.Children.Add(actions);
 
         var subParts = new List<string>();
         if (!string.IsNullOrEmpty(todo.DueDate)) subParts.Add(todo.DueDate);
@@ -1378,6 +1796,70 @@ public partial class MainWindow : Window
 
         row.Child = grid;
         return row;
+    }
+
+    /// <summary>行内改标题：回车保存，Esc 取消。</summary>
+    private void BeginInlineTodoEdit(TodoItem todo, Grid titleHost, TextBlock titleBlock)
+    {
+        titleHost.Children.Clear();
+        var box = new System.Windows.Controls.TextBox
+        {
+            Text = todo.Title,
+            FontSize = 13.5,
+            Style = (Style)FindResource("PlainInput"),
+            MinHeight = 26,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Tag = todo.Id,
+        };
+        void Commit()
+        {
+            var newTitle = (box.Text ?? "").Trim();
+            if (newTitle.Length == 0)
+            {
+                titleHost.Children.Clear();
+                titleHost.Children.Add(titleBlock);
+                return;
+            }
+            if (newTitle != todo.Title)
+            {
+                _store.UpdateTodoContent(todo.Id, newTitle, todo.Body ?? "");
+                RebuildCalendar();
+                ReloadTodos();
+                _ = TrySyncSilentAsync();
+                return;
+            }
+            titleHost.Children.Clear();
+            titleBlock.Text = newTitle;
+            titleHost.Children.Add(titleBlock);
+        }
+        void Cancel()
+        {
+            titleHost.Children.Clear();
+            titleHost.Children.Add(titleBlock);
+        }
+        box.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+            {
+                e.Handled = true;
+                Commit();
+            }
+            else if (e.Key == Key.Escape)
+            {
+                e.Handled = true;
+                Cancel();
+            }
+        };
+        box.LostKeyboardFocus += (_, _) =>
+        {
+            // 失焦也保存（若仍挂在树上）
+            if (titleHost.Children.Contains(box))
+                Commit();
+        };
+        titleHost.Children.Add(box);
+        box.Focus();
+        box.SelectAll();
+        _inputFocused = true;
     }
 
     private void OpenTodoInNotes(string todoId)
