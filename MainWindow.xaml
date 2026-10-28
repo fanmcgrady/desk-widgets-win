@@ -376,15 +376,18 @@
               </DockPanel>
               <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
                       Padding="16,14">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                  <StackPanel MaxWidth="720" HorizontalAlignment="Left">
+                <!-- Disabled 横向：否则子级按无限宽测量，正文不换行、附件星列变 0，右侧被裁切 -->
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                  <StackPanel>
                     <TextBlock x:Name="MailReadSubject" FontSize="16" FontWeight="SemiBold"
-                               TextWrapping="Wrap" Margin="0,0,0,8"/>
+                               TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,0,0,8"/>
                     <TextBlock x:Name="MailReadMeta" FontSize="12"
-                               Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                               Foreground="{StaticResource Muted}" TextWrapping="Wrap"
+                               VerticalAlignment="Top" Margin="0,0,0,10"/>
                     <StackPanel x:Name="MailReadAttachments" Margin="0,0,0,12"/>
                     <TextBlock x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
-                               LineHeight="22"/>
+                               VerticalAlignment="Top" TextOptions.TextFormattingMode="Display"/>
                   </StackPanel>
                 </ScrollViewer>
               </Border>

@@ -111,7 +111,8 @@ public sealed class ImapSmtpMailService
         catch { /* 部分服务器标记已读会失败，忽略 */ }
 
         var fromMb = msg.From.Mailboxes.FirstOrDefault();
-        var body = msg.TextBody;
+        // 纯文本优先；美团发票等信只有 HTML，需剥离标签并压空白
+        var body = CleanBodyText(msg.TextBody);
         if (string.IsNullOrWhiteSpace(body))
             body = StripHtml(msg.HtmlBody ?? "");
 
@@ -187,34 +188,30 @@ public sealed class ImapSmtpMailService
     private static List<MimePart> CollectAttachmentParts(MimeMessage msg)
     {
         var parts = new List<MimePart>();
-        foreach (var part in msg.BodyParts.OfType<MimePart>())
+        var seen = new HashSet<MimePart>();
+
+        void TryAdd(MimePart? part)
         {
-            // 正文 text/html、text/plain 且非附件 → 跳过
+            if (part == null || !seen.Add(part)) return;
             var isTextBody = part.ContentType.IsMimeType("text", "plain")
                              || part.ContentType.IsMimeType("text", "html");
-            if (isTextBody && !part.IsAttachment)
-                continue;
+            if (isTextBody && !part.IsAttachment) return;
 
-            // 有文件名、标记为附件，或非纯文本的 body part
             if (part.IsAttachment
                 || !string.IsNullOrWhiteSpace(part.FileName)
-                || (!isTextBody && part.ContentDisposition?.Disposition == ContentDisposition.Attachment))
+                || part.ContentDisposition?.Disposition == ContentDisposition.Attachment
+                || (!isTextBody && part.ContentType.MediaType.Equals("application", StringComparison.OrdinalIgnoreCase)))
             {
                 parts.Add(part);
-                continue;
             }
-
-            // 常见：application/*、image/* 内嵌也当作可下载附件列出（有文件名时）
-            if (!isTextBody && !string.IsNullOrWhiteSpace(part.FileName))
-                parts.Add(part);
         }
 
-        // 有些信只在 Attachments 集合里
-        if (parts.Count == 0)
-        {
-            foreach (var ent in msg.Attachments.OfType<MimePart>())
-                parts.Add(ent);
-        }
+        foreach (var part in msg.BodyParts.OfType<MimePart>())
+            TryAdd(part);
+
+        // MimeKit 的 Attachments 覆盖部分仅声明在该集合里的附件
+        foreach (var ent in msg.Attachments.OfType<MimePart>())
+            TryAdd(ent);
 
         return parts;
     }
@@ -309,18 +306,31 @@ public sealed class ImapSmtpMailService
         return mb.Address ?? "";
     }
 
+    private static string CleanBodyText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        // 去掉控制符（保留换行/制表），避免个别信把二进制渣滓当正文
+        var t = Regex.Replace(text, @"[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]", "");
+        t = Regex.Replace(t, "[ \\t]+", " ");
+        t = Regex.Replace(t, @"[ \t]*\r?\n[ \t]*", "\n");
+        t = Regex.Replace(t, @"\n{3,}", "\n\n");
+        return t.Trim();
+    }
+
     private static string StripHtml(string html)
     {
         if (string.IsNullOrEmpty(html)) return "";
         var t = Regex.Replace(html, "(?is)<script.*?>.*?</script>", " ");
         t = Regex.Replace(t, "(?is)<style.*?>.*?</style>", " ");
+        t = Regex.Replace(t, "(?is)<head.*?>.*?</head>", " ");
         t = Regex.Replace(t, "(?i)<br\\s*/?>", "\n");
         t = Regex.Replace(t, "(?i)</p>", "\n");
         t = Regex.Replace(t, "(?i)</div>", "\n");
+        t = Regex.Replace(t, "(?i)</tr>", "\n");
+        t = Regex.Replace(t, "(?i)</h[1-6]>", "\n");
+        t = Regex.Replace(t, "(?i)<hr[^>]*>", "\n");
         t = Regex.Replace(t, "<[^>]+>", " ");
         t = System.Net.WebUtility.HtmlDecode(t);
-        t = Regex.Replace(t, "[ \\t]+", " ");
-        t = Regex.Replace(t, "(\\r?\\n){3,}", "\n\n");
-        return t.Trim();
+        return CleanBodyText(t);
     }
 }

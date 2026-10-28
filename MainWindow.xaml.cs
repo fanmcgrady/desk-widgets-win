@@ -1328,44 +1328,24 @@ public partial class MainWindow : Window
             Text = $"附件（{detail.Attachments.Count}）",
             FontSize = 12,
             FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, 0, 0, 6),
         });
 
-        var accent = (MediaBrush)FindResource("Accent");
         var muted = (MediaBrush)FindResource("Muted");
         foreach (var att in detail.Attachments)
         {
             var row = new Border
             {
-                Background = new SolidColorBrush(MediaColor.FromArgb(0x10, 0x67, 0x50, 0xA4)),
+                Background = new SolidColorBrush(MediaColor.FromArgb(0x14, 0x67, 0x50, 0xA4)),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(10, 8, 10, 8),
                 Margin = new Thickness(0, 0, 0, 6),
+                HorizontalAlignment = WpfHorizontalAlignment.Stretch,
             };
-            var grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            var sizeText = att.Size > 0 ? FormatBytes(att.Size) : "";
-            var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            left.Children.Add(new TextBlock
-            {
-                Text = att.FileName,
-                FontSize = 12.5,
-                TextWrapping = TextWrapping.Wrap,
-            });
-            if (!string.IsNullOrEmpty(sizeText))
-            {
-                left.Children.Add(new TextBlock
-                {
-                    Text = sizeText,
-                    FontSize = 11,
-                    Foreground = muted,
-                    Margin = new Thickness(0, 2, 0, 0),
-                });
-            }
-            Grid.SetColumn(left, 0);
-
+            // DockPanel 避开 Grid * 列在无限宽测量下变成 0 宽的问题
+            var dock = new DockPanel { LastChildFill = true };
             var saveBtn = new WpfButton
             {
                 Content = "下载",
@@ -1380,20 +1360,41 @@ public partial class MainWindow : Window
                 if (saveBtn.Tag is not MailAttachmentInfo info) return;
                 await DownloadMailAttachmentAsync(captureUid, info);
             };
-            Grid.SetColumn(saveBtn, 1);
+            DockPanel.SetDock(saveBtn, Dock.Right);
+            dock.Children.Add(saveBtn);
 
-            grid.Children.Add(left);
-            grid.Children.Add(saveBtn);
-            row.Child = grid;
+            var sizeText = att.Size > 0 ? FormatBytes(att.Size) : (string.IsNullOrEmpty(att.ContentType) ? "" : att.ContentType);
+            var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            left.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrWhiteSpace(att.FileName) ? "未命名附件" : att.FileName,
+                FontSize = 12.5,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Top,
+            });
+            if (!string.IsNullOrEmpty(sizeText))
+            {
+                left.Children.Add(new TextBlock
+                {
+                    Text = sizeText,
+                    FontSize = 11,
+                    Foreground = muted,
+                    Margin = new Thickness(0, 2, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Top,
+                });
+            }
+            dock.Children.Add(left);
+            row.Child = dock;
             MailReadAttachments.Children.Add(row);
         }
     }
 
     private async Task DownloadMailAttachmentAsync(MailKit.UniqueId uid, MailAttachmentInfo att)
     {
+        var safeName = SanitizeFileName(att.FileName);
         var dlg = new Microsoft.Win32.SaveFileDialog
         {
-            FileName = att.FileName,
+            FileName = safeName,
             Title = "保存附件",
             Filter = "所有文件|*.*",
         };
@@ -1412,6 +1413,14 @@ public partial class MainWindow : Window
         {
             SetMailStatus("下载失败：" + ShortErr(ex));
         }
+    }
+
+    private static string SanitizeFileName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "attachment";
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(name.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? "attachment" : cleaned;
     }
 
     private static string FormatBytes(long bytes)
