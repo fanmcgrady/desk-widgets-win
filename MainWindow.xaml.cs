@@ -32,8 +32,18 @@ public partial class MainWindow : Window
     private readonly Store _store = new();
     private readonly NoteFiles _notes = new();
     private readonly MsToDoSync _sync;
+    private readonly ImapSmtpMailService _mail = new();
+    private enum MailView { List, Read, Compose, Settings }
+    private MailView _mailView = MailView.List;
+    private MailMessageDetail? _mailCurrent;
+    private bool _mailBusy;
+    private int _mailUnread;
+    private List<MailMessageSummary> _mailCache = new();
+    private DateTime _mailCacheAtUtc = DateTime.MinValue;
+    private static readonly TimeSpan MailCacheTtl = TimeSpan.FromMinutes(3);
     private readonly DispatcherTimer _edgeTimer;
     private readonly DispatcherTimer _syncTimer;
+    private readonly DispatcherTimer _mailPollTimer;
     private WinForms.NotifyIcon? _tray;
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
@@ -41,6 +51,8 @@ public partial class MainWindow : Window
     private bool _expanded;
     private bool _allowClose;
     private DateTime? _leaveSince;
+    /// <summary>托盘打开后：鼠标尚未进入侧栏前不自动收起，避免一点开就被 EdgeTimer 关掉。</summary>
+    private bool _awaitPanelEnter;
     private int _year;
     private int _month;
     private DateTime _selected;
@@ -76,6 +88,10 @@ public partial class MainWindow : Window
                 await TrySyncSilentAsync();
         };
 
+        // 邮件未读：约每 2 分钟静默查一次；进邮件页 / 手动刷新也会更新
+        _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
+        _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
+
         Loaded += OnLoaded;
         Closing += (_, e) =>
         {
@@ -87,6 +103,7 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        Autostart.ApplyPreferred(); // 默认开机自启；托盘可关，并记住选择
         SetupTray();
         StyleTabs();
         PaintShowDoneBox();
@@ -103,8 +120,10 @@ public partial class MainWindow : Window
         Expand();
         _edgeTimer.Start();
         _syncTimer.Start();
+        _mailPollTimer.Start();
+        _ = PollMailUnreadAsync(silent: true);
 
-        var hide = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
+        var hide = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
         hide.Tick += (_, _) =>
         {
             hide.Stop();
@@ -230,6 +249,15 @@ public partial class MainWindow : Window
         _leaveSince = null;
         PlaceExpanded();
         Activate();
+        Topmost = true;
+    }
+
+    /// <summary>托盘 / 菜单唤起：展开后等鼠标进侧栏再启用自动收起。</summary>
+    private void ExpandFromTray()
+    {
+        _awaitPanelEnter = true;
+        _leaveSince = null;
+        Expand();
     }
 
     private void Collapse()
@@ -237,6 +265,7 @@ public partial class MainWindow : Window
         FlushNoteSave();
         _expanded = false;
         _leaveSince = null;
+        _awaitPanelEnter = false;
         PlaceCollapsed();
     }
 
@@ -250,6 +279,7 @@ public partial class MainWindow : Window
             if (edgeScreen != null)
             {
                 _dockScreen = edgeScreen;
+                _awaitPanelEnter = false;
                 Expand();
             }
             return;
@@ -275,6 +305,16 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_awaitPanelEnter)
+        {
+            if (inPanel || nearEdge)
+            {
+                _awaitPanelEnter = false;
+                _leaveSince = null;
+            }
+            return; // 尚未进过侧栏：保持展开
+        }
+
         if (_inputFocused || inPanel || nearEdge)
         {
             _leaveSince = null;
@@ -283,7 +323,7 @@ public partial class MainWindow : Window
 
         var now = DateTime.UtcNow;
         if (_leaveSince == null) _leaveSince = now;
-        else if ((now - _leaveSince.Value).TotalMilliseconds >= 120)
+        else if ((now - _leaveSince.Value).TotalMilliseconds >= 50)
             Collapse();
     }
 
@@ -322,7 +362,7 @@ public partial class MainWindow : Window
             Text = "桌面侧栏",
         };
         var menu = new WinForms.ContextMenuStrip();
-        menu.Items.Add("展开侧栏", null, (_, _) => Dispatcher.Invoke(Expand));
+        menu.Items.Add("展开侧栏", null, (_, _) => Dispatcher.Invoke(ExpandFromTray));
         menu.Items.Add("收起侧栏", null, (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("登录并同步", null, async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
@@ -343,7 +383,21 @@ public partial class MainWindow : Window
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(Quit));
         _tray.ContextMenuStrip = menu;
-        _tray.DoubleClick += (_, _) => Dispatcher.Invoke(Expand);
+        // 左键单击 / 双击：展开；已展开则置顶。右键仍出菜单。
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button != WinForms.MouseButtons.Left) return;
+            Dispatcher.Invoke(() =>
+            {
+                if (_expanded)
+                {
+                    Activate();
+                    Topmost = true;
+                }
+                else ExpandFromTray();
+            });
+        };
+        _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ExpandFromTray);
     }
 
     private static DrawingIcon CreateTrayIcon()
@@ -365,6 +419,7 @@ public partial class MainWindow : Window
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _edgeTimer.Stop();
         _syncTimer.Stop();
+        _mailPollTimer.Stop();
         if (_tray != null)
         {
             _tray.Visible = false;
@@ -561,6 +616,490 @@ public partial class MainWindow : Window
         ExitTodoEditMode();
         _tab = TabMode.Mail;
         StyleTabs();
+        _ = EnterMailTabAsync();
+    }
+
+    // ----- 邮件（IMAP/SMTP，默认 mail.scu.edu.cn） -----
+
+    private async Task EnterMailTabAsync()
+    {
+        _mail.Reload();
+        if (!_mail.Config.IsConfigured)
+        {
+            ShowMailView(MailView.Settings);
+            LoadMailSettingsForm();
+            SetMailStatus("先填写川大邮箱账号（默认 mail.scu.edu.cn）");
+            return;
+        }
+        ShowMailView(MailView.List);
+        // 有缓存先秒开，过期再后台拉；无缓存才阻塞拉取
+        await ReloadMailInboxAsync(force: false);
+    }
+
+    private void SetMailStatus(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            MailStatus.Text = "";
+            MailStatus.Visibility = Visibility.Collapsed;
+            return;
+        }
+        MailStatus.Text = text;
+        MailStatus.Visibility = Visibility.Visible;
+    }
+
+    private void ShowMailView(MailView view)
+    {
+        _mailView = view;
+        MailListHost.Visibility = view == MailView.List ? Visibility.Visible : Visibility.Collapsed;
+        MailReadHost.Visibility = view == MailView.Read ? Visibility.Visible : Visibility.Collapsed;
+        MailComposeHost.Visibility = view == MailView.Compose ? Visibility.Visible : Visibility.Collapsed;
+        MailSettingsHost.Visibility = view == MailView.Settings ? Visibility.Visible : Visibility.Collapsed;
+        BtnMailRefresh.Visibility = view == MailView.List ? Visibility.Visible : Visibility.Collapsed;
+
+        void Paint(Border b, TextBlock t, bool on)
+        {
+            var accent = (MediaBrush)FindResource("Accent");
+            var muted = (MediaBrush)FindResource("Muted");
+            var fg = (MediaBrush)FindResource("Fg");
+            b.BorderBrush = on ? accent : MediaBrushes.Transparent;
+            t.Foreground = on ? fg : muted;
+            t.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+        }
+        Paint(MailTabInbox, MailTabInboxText, view is MailView.List or MailView.Read);
+        Paint(MailTabCompose, MailTabComposeText, view == MailView.Compose);
+        Paint(MailTabSettings, MailTabSettingsText, view == MailView.Settings);
+
+        if (view == MailView.Compose)
+            UpdateMailComposeHints();
+    }
+
+    private void MailTabInbox_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (!_mail.Config.IsConfigured)
+        {
+            ShowMailView(MailView.Settings);
+            LoadMailSettingsForm();
+            SetMailStatus("请先配置邮箱");
+            return;
+        }
+        ShowMailView(MailView.List);
+        _ = ReloadMailInboxAsync(force: false);
+    }
+
+    private void MailTabCompose_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (!_mail.Config.IsConfigured)
+        {
+            ShowMailView(MailView.Settings);
+            LoadMailSettingsForm();
+            SetMailStatus("发送前请先配置邮箱");
+            return;
+        }
+        _mailCurrent = null;
+        MailTo.Text = "";
+        MailSubject.Text = "";
+        MailBody.Text = "";
+        ShowMailView(MailView.Compose);
+        SetMailStatus($"发件人 {_mail.Config.Email}");
+        UpdateMailComposeHints();
+        MailTo.Focus();
+    }
+
+    private void MailTabSettings_Click(object sender, MouseButtonEventArgs e)
+    {
+        ShowMailView(MailView.Settings);
+        LoadMailSettingsForm();
+        SetMailStatus(null);
+    }
+
+    private void MailComposeField_TextChanged(object sender, TextChangedEventArgs e)
+        => UpdateMailComposeHints();
+
+    private void UpdateMailComposeHints()
+    {
+        MailToHint.Visibility = string.IsNullOrEmpty(MailTo.Text) ? Visibility.Visible : Visibility.Collapsed;
+        MailSubjectHint.Visibility = string.IsNullOrEmpty(MailSubject.Text) ? Visibility.Visible : Visibility.Collapsed;
+        MailBodyHint.Visibility = string.IsNullOrEmpty(MailBody.Text) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void MailBody_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        {
+            e.Handled = true;
+            BtnMailSend_Click(sender, new RoutedEventArgs());
+        }
+    }
+
+    private void LoadMailSettingsForm()
+    {
+        var c = _mail.Config;
+        MailCfgEmail.Text = c.Email;
+        MailCfgDisplayName.Text = c.DisplayName;
+        MailCfgImapHost.Text = string.IsNullOrWhiteSpace(c.ImapHost) ? "mail.scu.edu.cn" : c.ImapHost;
+        MailCfgImapPort.Text = c.ImapPort <= 0 ? "993" : c.ImapPort.ToString();
+        MailCfgSmtpHost.Text = string.IsNullOrWhiteSpace(c.SmtpHost) ? "mail.scu.edu.cn" : c.SmtpHost;
+        MailCfgSmtpPort.Text = c.SmtpPort <= 0 ? "465" : c.SmtpPort.ToString();
+        MailCfgPassword.Password = ""; // 不回填明文
+    }
+
+    private async void BtnMailSaveSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mailBusy) return;
+        var email = MailCfgEmail.Text.Trim();
+        if (string.IsNullOrEmpty(email) || !email.Contains('@'))
+        {
+            SetMailStatus("请填写完整邮箱，例如 name@scu.edu.cn");
+            return;
+        }
+        if (string.IsNullOrEmpty(MailCfgPassword.Password) && string.IsNullOrEmpty(_mail.Config.PasswordProtected))
+        {
+            SetMailStatus("请填写邮箱密码");
+            return;
+        }
+
+        var cfg = MailAccountConfig.Load();
+        cfg.Email = email;
+        cfg.DisplayName = MailCfgDisplayName.Text.Trim();
+        cfg.ImapHost = string.IsNullOrWhiteSpace(MailCfgImapHost.Text) ? "mail.scu.edu.cn" : MailCfgImapHost.Text.Trim();
+        cfg.SmtpHost = string.IsNullOrWhiteSpace(MailCfgSmtpHost.Text) ? "mail.scu.edu.cn" : MailCfgSmtpHost.Text.Trim();
+        if (!int.TryParse(MailCfgImapPort.Text.Trim(), out var imapPort)) imapPort = 993;
+        if (!int.TryParse(MailCfgSmtpPort.Text.Trim(), out var smtpPort)) smtpPort = 465;
+        cfg.ImapPort = imapPort;
+        cfg.SmtpPort = smtpPort;
+        cfg.ImapSsl = imapPort == 993;
+        cfg.SmtpSsl = smtpPort is 465 or 994;
+        if (!string.IsNullOrEmpty(MailCfgPassword.Password))
+            cfg.SetPassword(MailCfgPassword.Password);
+        cfg.Save();
+        _mail.Reload();
+
+        _mailBusy = true;
+        SetMailStatus("正在测试 IMAP / SMTP…");
+        try
+        {
+            await _mail.TestAsync();
+            SetMailStatus("连接成功，已保存");
+            MailCfgPassword.Password = "";
+            ShowMailView(MailView.List);
+            await ReloadMailInboxAsync(force: true);
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("连接失败：" + ShortErr(ex));
+        }
+        finally { _mailBusy = false; }
+    }
+
+    private async void BtnMailRefresh_Click(object sender, RoutedEventArgs e)
+        => await ReloadMailInboxAsync(force: true);
+
+    private async Task ReloadMailInboxAsync(bool force)
+    {
+        if (_mailBusy) return;
+        if (!_mail.Config.IsConfigured)
+        {
+            ShowMailView(MailView.Settings);
+            LoadMailSettingsForm();
+            return;
+        }
+
+        var cacheFresh = _mailCache.Count > 0
+                         && DateTime.UtcNow - _mailCacheAtUtc < MailCacheTtl;
+
+        // 有缓存：立刻渲染；未强制且未过期则不再联网
+        if (_mailCache.Count > 0)
+        {
+            RenderMailList(_mailCache);
+            SetMailStatus(FormatMailListStatus(_mailCache, fromCache: true));
+            if (!force && cacheFresh)
+            {
+                _ = PollMailUnreadAsync(silent: true);
+                return;
+            }
+        }
+
+        if (!force && cacheFresh) return;
+
+        _mailBusy = true;
+        if (_mailCache.Count == 0)
+            SetMailStatus("正在拉取收件箱…");
+        else
+            SetMailStatus(FormatMailListStatus(_mailCache, fromCache: true) + " · 更新中…");
+
+        try
+        {
+            var items = await Task.Run(async () => await _mail.ListInboxAsync(40));
+            _mailCache = items.ToList();
+            _mailCacheAtUtc = DateTime.UtcNow;
+            RenderMailList(_mailCache);
+            SetMailStatus(FormatMailListStatus(_mailCache, fromCache: false));
+            _ = PollMailUnreadAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            if (_mailCache.Count > 0)
+                SetMailStatus("更新失败，仍显示缓存 · " + ShortErr(ex));
+            else
+            {
+                SetMailStatus("拉取失败：" + ShortErr(ex));
+                MailList.Children.Clear();
+                MailList.Children.Add(new TextBlock
+                {
+                    Text = "无法连接邮箱。可到「设置」检查账号，或点刷新重试。",
+                    Foreground = (MediaBrush)FindResource("Muted"),
+                    FontSize = 12,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(12, 24, 12, 24),
+                });
+            }
+        }
+        finally { _mailBusy = false; }
+    }
+
+    private static string FormatMailListStatus(IReadOnlyList<MailMessageSummary> items, bool fromCache)
+    {
+        var unread = items.Count(m => !m.IsRead);
+        var head = fromCache ? "缓存" : "最新";
+        return unread > 0
+            ? $"{head} · {items.Count} 封 · 未读 {unread}"
+            : $"{head} · {items.Count} 封";
+    }
+
+    private void RenderMailList(IReadOnlyList<MailMessageSummary> items)
+    {
+        MailList.Children.Clear();
+        if (items.Count == 0)
+        {
+            MailList.Children.Add(new Grid
+            {
+                MinHeight = 120,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "收件箱是空的",
+                        Foreground = (MediaBrush)FindResource("Muted"),
+                        FontSize = 12.5,
+                        HorizontalAlignment = WpfHorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                    },
+                },
+            });
+            return;
+        }
+        foreach (var m in items)
+            MailList.Children.Add(BuildMailRow(m));
+    }
+
+    private async Task PollMailUnreadAsync(bool silent)
+    {
+        try
+        {
+            _mail.Reload();
+            if (!_mail.Config.IsConfigured)
+            {
+                UpdateMailBadges(0);
+                return;
+            }
+            var n = await Task.Run(async () => await _mail.CountUnreadAsync());
+            UpdateMailBadges(n);
+            if (!silent && _tab == TabMode.Mail && _mailView == MailView.List)
+                SetMailStatus($"未读 {n} 封");
+        }
+        catch
+        {
+            if (!silent) SetMailStatus("未读数刷新失败");
+        }
+    }
+
+    private void UpdateMailBadges(int unread)
+    {
+        _mailUnread = Math.Max(0, unread);
+        var text = _mailUnread > 99 ? "99+" : _mailUnread.ToString();
+        var show = _mailUnread > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        MailTabBadgeText.Text = text;
+        MailTabBadge.Visibility = show;
+        MailInboxBadgeText.Text = text;
+        MailInboxBadge.Visibility = show;
+
+        if (_tray != null)
+            _tray.Text = _mailUnread > 0 ? $"桌面侧栏 · 未读邮件 {_mailUnread}" : "桌面侧栏";
+    }
+
+    private UIElement BuildMailRow(MailMessageSummary m)
+    {
+        var muted = (MediaBrush)FindResource("Muted");
+        var fg = (MediaBrush)FindResource("Fg");
+        var hover = (MediaBrush)FindResource("Hover");
+        var line = (MediaBrush)FindResource("Line");
+
+        var row = new Border
+        {
+            Background = MediaBrushes.Transparent,
+            BorderBrush = line,
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(10, 10, 8, 10),
+            Cursor = WpfCursors.Hand,
+            Tag = m,
+        };
+        row.MouseEnter += (_, _) => row.Background = hover;
+        row.MouseLeave += (_, _) => row.Background = MediaBrushes.Transparent;
+        row.MouseLeftButtonUp += async (_, _) =>
+        {
+            if (row.Tag is MailMessageSummary s)
+                await OpenMailAsync(s.Uid);
+        };
+
+        var stack = new StackPanel();
+        stack.Children.Add(new TextBlock
+        {
+            Text = m.Subject,
+            FontSize = 13,
+            FontWeight = m.IsRead ? FontWeights.Normal : FontWeights.SemiBold,
+            Foreground = fg,
+            TextWrapping = TextWrapping.Wrap,
+        });
+        var meta = m.From;
+        if (m.Received != null)
+            meta += " · " + m.Received.Value.ToLocalTime().ToString("MM-dd HH:mm");
+        stack.Children.Add(new TextBlock
+        {
+            Text = meta,
+            FontSize = 11,
+            Foreground = muted,
+            Margin = new Thickness(0, 3, 0, 0),
+        });
+        if (!string.IsNullOrWhiteSpace(m.Preview))
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = m.Preview,
+                FontSize = 11.5,
+                Foreground = muted,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 0),
+            });
+        }
+        row.Child = stack;
+        return row;
+    }
+
+    private async Task OpenMailAsync(MailKit.UniqueId uid)
+    {
+        if (_mailBusy) return;
+        _mailBusy = true;
+        SetMailStatus("正在打开…");
+        try
+        {
+            var detail = await Task.Run(async () => await _mail.GetMessageAsync(uid));
+            _mailCurrent = detail;
+            MailReadSubject.Text = detail.Subject;
+            var meta = $"发件人 {detail.From}";
+            if (!string.IsNullOrEmpty(detail.To)) meta += $"\n收件人 {detail.To}";
+            if (detail.Received != null)
+                meta += $"\n时间 {detail.Received.Value.ToLocalTime():yyyy-MM-dd HH:mm}";
+            MailReadMeta.Text = meta;
+            MailReadBody.Text = string.IsNullOrWhiteSpace(detail.BodyText) ? "（无正文）" : detail.BodyText;
+            ShowMailView(MailView.Read);
+            SetMailStatus(null);
+            // 缓存里标已读，避免返回列表又整页重拉
+            for (var i = 0; i < _mailCache.Count; i++)
+            {
+                if (_mailCache[i].Uid != uid) continue;
+                var old = _mailCache[i];
+                if (!old.IsRead)
+                {
+                    _mailCache[i] = new MailMessageSummary
+                    {
+                        Id = old.Id,
+                        Uid = old.Uid,
+                        Subject = old.Subject,
+                        From = old.From,
+                        Preview = old.Preview,
+                        Received = old.Received,
+                        IsRead = true,
+                    };
+                    if (_mailUnread > 0) UpdateMailBadges(_mailUnread - 1);
+                }
+                break;
+            }
+            _ = PollMailUnreadAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("打开失败：" + ShortErr(ex));
+        }
+        finally { _mailBusy = false; }
+    }
+
+    private void BtnMailBack_Click(object sender, RoutedEventArgs e)
+    {
+        // 返回只渲染缓存，不重新联网
+        ShowMailView(MailView.List);
+        if (_mailCache.Count > 0)
+        {
+            RenderMailList(_mailCache);
+            SetMailStatus(FormatMailListStatus(_mailCache, fromCache: true));
+        }
+        else
+            _ = ReloadMailInboxAsync(force: false);
+    }
+
+    private void BtnMailReply_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mailCurrent == null) return;
+        var addr = _mailCurrent.FromAddress;
+        if (string.IsNullOrEmpty(addr)) addr = _mailCurrent.From;
+        MailTo.Text = addr;
+        var sub = _mailCurrent.Subject;
+        MailSubject.Text = sub.StartsWith("Re:", StringComparison.OrdinalIgnoreCase) ? sub : "Re: " + sub;
+        MailBody.Text = "\n\n----- 原文 -----\n" + _mailCurrent.BodyText;
+        ShowMailView(MailView.Compose);
+        SetMailStatus("回复 · " + _mail.Config.Email);
+        UpdateMailComposeHints();
+        MailBody.Focus();
+        MailBody.CaretIndex = 0;
+    }
+
+    private async void BtnMailSend_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mailBusy) return;
+        if (string.IsNullOrWhiteSpace(MailTo.Text))
+        {
+            SetMailStatus("请填写收件人");
+            MailTo.Focus();
+            return;
+        }
+        _mailBusy = true;
+        SetMailStatus("正在发送…");
+        try
+        {
+            var to = MailTo.Text;
+            var subject = MailSubject.Text;
+            var body = MailBody.Text;
+            await Task.Run(async () => await _mail.SendAsync(to, subject, body));
+            MailTo.Text = "";
+            MailSubject.Text = "";
+            MailBody.Text = "";
+            ShowMailView(MailView.List);
+            SetMailStatus("已发送");
+            await ReloadMailInboxAsync(force: true);
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("发送失败：" + ShortErr(ex));
+        }
+        finally { _mailBusy = false; }
+    }
+
+    private static string ShortErr(Exception ex)
+    {
+        var msg = ex.Message;
+        if (msg.Length > 120) msg = msg[..120] + "…";
+        return msg;
     }
 
     private void StyleTabs()

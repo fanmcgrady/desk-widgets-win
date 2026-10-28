@@ -59,6 +59,52 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <!-- 邮件阅读区小操作按钮：不拉满整行 -->
+    <Style x:Key="MailActionBtn" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="10,4"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="MinWidth" Value="56"/>
+      <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    CornerRadius="14" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="MailGhostBtn" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="8,4"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    CornerRadius="14" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#14000000"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="TextBlock">
       <Setter Property="FontFamily" Value="Microsoft YaHei UI"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
@@ -141,7 +187,15 @@
         <Border x:Name="TabMailBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
                 MouseLeftButtonUp="TabMail_Click" Padding="0,0,0,6">
-          <TextBlock x:Name="TabMailText" Text="收发邮件" FontSize="13" Foreground="{StaticResource Muted}"/>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock x:Name="TabMailText" Text="收发邮件" FontSize="13" Foreground="{StaticResource Muted}"/>
+            <Border x:Name="MailTabBadge" Visibility="Collapsed" CornerRadius="8" Height="16"
+                    MinWidth="16" Padding="5,0" Margin="6,0,0,0" Background="{StaticResource Accent}"
+                    VerticalAlignment="Center">
+              <TextBlock x:Name="MailTabBadgeText" Text="0" FontSize="10" Foreground="White"
+                         FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+          </StackPanel>
         </Border>
       </StackPanel>
 
@@ -261,13 +315,203 @@
         </DockPanel>
 
         <DockPanel x:Name="MailPanel" Visibility="Collapsed">
-          <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
-                  Padding="16,28">
-            <TextBlock TextWrapping="Wrap" TextAlignment="Center"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                       Foreground="{StaticResource Muted}" FontSize="12.5"
-                       Text="邮件功能预留中，后续可对接 Outlook / Microsoft Graph。"/>
-          </Border>
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="False">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Border x:Name="MailTabInbox" BorderThickness="0,0,0,2" BorderBrush="{StaticResource Accent}"
+                      Margin="0,0,14,0" Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="MailTabInbox_Click">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock x:Name="MailTabInboxText" Text="收件箱" FontSize="12.5" FontWeight="SemiBold"/>
+                  <Border x:Name="MailInboxBadge" Visibility="Collapsed" CornerRadius="8" Height="15"
+                          MinWidth="15" Padding="4,0" Margin="5,0,0,0" Background="{StaticResource Accent}"
+                          VerticalAlignment="Center">
+                    <TextBlock x:Name="MailInboxBadgeText" Text="0" FontSize="9.5" Foreground="White"
+                               FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                </StackPanel>
+              </Border>
+              <Border x:Name="MailTabCompose" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                      Margin="0,0,14,0" Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="MailTabCompose_Click">
+                <TextBlock x:Name="MailTabComposeText" Text="写邮件" FontSize="12.5"
+                           Foreground="{StaticResource Muted}"/>
+              </Border>
+              <Border x:Name="MailTabSettings" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                      Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="MailTabSettings_Click">
+                <TextBlock x:Name="MailTabSettingsText" Text="设置" FontSize="12.5"
+                           Foreground="{StaticResource Muted}"/>
+              </Border>
+            </StackPanel>
+            <Button x:Name="BtnMailRefresh" DockPanel.Dock="Right" Content="刷新"
+                    Foreground="{StaticResource Muted}" FontSize="11.5"
+                    Click="BtnMailRefresh_Click" VerticalAlignment="Center"/>
+          </DockPanel>
+
+          <TextBlock x:Name="MailStatus" DockPanel.Dock="Top" FontSize="11"
+                     Foreground="{StaticResource Muted}" Margin="2,0,2,6" TextWrapping="Wrap"
+                     Visibility="Collapsed"/>
+
+          <!-- 四个视图叠在同一铺满区域，避免 DockPanel 默认左停靠把写信挤成窄条 -->
+          <Grid>
+            <!-- 收件箱 -->
+            <Border x:Name="MailListHost" Background="White" CornerRadius="8"
+                    BorderBrush="#10000000" BorderThickness="1" Padding="0">
+              <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0">
+                <StackPanel x:Name="MailList"/>
+              </ScrollViewer>
+            </Border>
+
+            <!-- 阅读 -->
+            <DockPanel x:Name="MailReadHost" Visibility="Collapsed">
+              <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="False">
+                <Button Content="← 返回" Style="{StaticResource MailGhostBtn}"
+                        Click="BtnMailBack_Click" HorizontalAlignment="Left"/>
+                <Button DockPanel.Dock="Right" Content="回复" Style="{StaticResource MailActionBtn}"
+                        Click="BtnMailReply_Click"/>
+              </DockPanel>
+              <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
+                      Padding="12,12">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                  <StackPanel>
+                    <TextBlock x:Name="MailReadSubject" FontSize="14" FontWeight="SemiBold"
+                               TextWrapping="Wrap" Margin="0,0,0,6"/>
+                    <TextBlock x:Name="MailReadMeta" FontSize="11.5"
+                               Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                    <TextBlock x:Name="MailReadBody" FontSize="12.5" TextWrapping="Wrap"
+                               LineHeight="20"/>
+                  </StackPanel>
+                </ScrollViewer>
+              </Border>
+            </DockPanel>
+
+            <!-- 写信：整页铺满 -->
+            <DockPanel x:Name="MailComposeHost" Visibility="Collapsed">
+              <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                <TextBlock Text="Ctrl+Enter 发送" Foreground="{StaticResource Muted}" FontSize="11"
+                           VerticalAlignment="Center"/>
+                <Button DockPanel.Dock="Right" Content="发送" Style="{StaticResource PrimaryBtn}"
+                        Width="88" Height="32" Click="BtnMailSend_Click"/>
+              </DockPanel>
+              <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
+                      Padding="12,10">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Top">
+                    <Grid Margin="0,0,0,2" MinHeight="30">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="40"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="收件" Foreground="{StaticResource Muted}" FontSize="12"
+                                 VerticalAlignment="Center"/>
+                      <Grid Grid.Column="1">
+                        <TextBox x:Name="MailTo" Style="{StaticResource PlainInput}"
+                                 FontSize="12.5" MinHeight="28" VerticalContentAlignment="Center"
+                                 TextChanged="MailComposeField_TextChanged"
+                                 GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                        <TextBlock x:Name="MailToHint" Text="收件人邮箱，多人用分号分隔"
+                                   IsHitTestVisible="False" Foreground="#AA79747E" FontSize="12"
+                                   VerticalAlignment="Center" Margin="2,0,0,0"/>
+                      </Grid>
+                    </Grid>
+                    <Border Height="1" Background="#12000000" Margin="0,4,0,4"/>
+                    <Grid Margin="0,0,0,2" MinHeight="30">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="40"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="主题" Foreground="{StaticResource Muted}" FontSize="12"
+                                 VerticalAlignment="Center"/>
+                      <Grid Grid.Column="1">
+                        <TextBox x:Name="MailSubject" Style="{StaticResource PlainInput}"
+                                 FontSize="12.5" MinHeight="28" VerticalContentAlignment="Center"
+                                 TextChanged="MailComposeField_TextChanged"
+                                 GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                        <TextBlock x:Name="MailSubjectHint" Text="邮件主题"
+                                   IsHitTestVisible="False" Foreground="#AA79747E" FontSize="12"
+                                   VerticalAlignment="Center" Margin="2,0,0,0"/>
+                      </Grid>
+                    </Grid>
+                    <Border Height="1" Background="#12000000" Margin="0,4,0,8"/>
+                  </StackPanel>
+                  <Grid>
+                    <TextBox x:Name="MailBody" Style="{StaticResource PlainInput}"
+                             AcceptsReturn="True" TextWrapping="Wrap" FontSize="12.5"
+                             VerticalScrollBarVisibility="Auto"
+                             VerticalContentAlignment="Top"
+                             TextChanged="MailComposeField_TextChanged"
+                             PreviewKeyDown="MailBody_PreviewKeyDown"
+                             GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                    <TextBlock x:Name="MailBodyHint" Text="正文…"
+                               IsHitTestVisible="False" Foreground="#AA79747E" FontSize="12.5"
+                               Margin="2,4,0,0" VerticalAlignment="Top"/>
+                  </Grid>
+                </DockPanel>
+              </Border>
+            </DockPanel>
+
+            <!-- 设置 -->
+            <Border x:Name="MailSettingsHost" Visibility="Collapsed" Background="White"
+                    CornerRadius="8" BorderBrush="#10000000" BorderThickness="1" Padding="12,10">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                  <TextBlock Text="川大邮箱 / IMAP·SMTP" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,4"/>
+                  <TextBlock Text="密码仅保存在本机（Windows DPAPI）" Foreground="{StaticResource Muted}"
+                             FontSize="11" Margin="0,0,0,10"/>
+                  <TextBlock Text="邮箱" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,2"/>
+                  <Border Background="#08000000" CornerRadius="6" Padding="8,0" Margin="0,0,0,8">
+                    <TextBox x:Name="MailCfgEmail" Style="{StaticResource PlainInput}" Height="30" FontSize="12.5"
+                             GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                  </Border>
+                  <TextBlock Text="密码" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,2"/>
+                  <Border Background="#08000000" CornerRadius="6" Padding="8,0" Margin="0,0,0,8">
+                    <PasswordBox x:Name="MailCfgPassword" Height="30" FontSize="12.5"
+                                 Padding="0,4" BorderThickness="0" Background="Transparent"
+                                 GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                  </Border>
+                  <TextBlock Text="显示名（可选）" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,2"/>
+                  <Border Background="#08000000" CornerRadius="6" Padding="8,0" Margin="0,0,0,8">
+                    <TextBox x:Name="MailCfgDisplayName" Style="{StaticResource PlainInput}" Height="30" FontSize="12.5"
+                             GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                  </Border>
+                  <TextBlock Text="IMAP" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,4,0,2"/>
+                  <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="72"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Background="#08000000" CornerRadius="6" Padding="8,0" Margin="0,0,6,0">
+                      <TextBox x:Name="MailCfgImapHost" Style="{StaticResource PlainInput}" Height="30" FontSize="12.5"
+                               GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                    </Border>
+                    <Border Grid.Column="1" Background="#08000000" CornerRadius="6" Padding="8,0">
+                      <TextBox x:Name="MailCfgImapPort" Style="{StaticResource PlainInput}" Height="30"
+                               FontSize="12.5" TextAlignment="Center"
+                               GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                    </Border>
+                  </Grid>
+                  <TextBlock Text="SMTP" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,2"/>
+                  <Grid Margin="0,0,0,14">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="72"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Background="#08000000" CornerRadius="6" Padding="8,0" Margin="0,0,6,0">
+                      <TextBox x:Name="MailCfgSmtpHost" Style="{StaticResource PlainInput}" Height="30" FontSize="12.5"
+                               GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                    </Border>
+                    <Border Grid.Column="1" Background="#08000000" CornerRadius="6" Padding="8,0">
+                      <TextBox x:Name="MailCfgSmtpPort" Style="{StaticResource PlainInput}" Height="30"
+                               FontSize="12.5" TextAlignment="Center"
+                               GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                    </Border>
+                  </Grid>
+                  <Button Content="保存并测试连接" Style="{StaticResource PrimaryBtn}" Height="32"
+                          Click="BtnMailSaveSettings_Click"/>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Grid>
         </DockPanel>
       </Grid>
     </DockPanel>

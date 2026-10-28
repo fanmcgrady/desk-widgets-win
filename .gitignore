@@ -14,14 +14,19 @@ obj/
 *.swp
 *~
 
-## Secrets / local config
+## Secrets / local config（实际在 %APPDATA%\DeskWidgets，再保险忽略）
 *.env
 .env*
 ms-sync.json
 **/ms-sync.json
+mail-account.json
+**/mail-account.json
+autostart.pref
 **/TokenCache*
 **/msal*.bin
 **/msal*.cache
+desk.db
+**/desk.db
 
 ## OS
 Thumbs.db
