@@ -1,0 +1,29 @@
+## Build
+bin/
+obj/
+[Bb]uild/
+[Oo]ut/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## IDE
+.vs/
+.idea/
+*.swp
+*~
+
+## Secrets / local config
+*.env
+.env*
+ms-sync.json
+**/ms-sync.json
+**/TokenCache*
+**/msal*.bin
+**/msal*.cache
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
