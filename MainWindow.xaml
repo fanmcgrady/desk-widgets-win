@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
-        Title="桌面侧栏"
+        Title="方老师的工作区"
         WindowStyle="None"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
@@ -152,15 +152,16 @@
   </Window.Resources>
 
   <!-- 面板底半透明，内层白卡片仍不透明，便于看见背后桌面 -->
-  <Border Background="#99F7F7F8" BorderBrush="#33000000" BorderThickness="1,0,0,0">
+  <!-- 透明度约 80%（不透明度约 20%） -->
+  <Border Background="#33F7F7F8" BorderBrush="#33000000" BorderThickness="1,0,0,0">
     <DockPanel Margin="12,10,12,10">
       <!-- 顶栏标题 -->
       <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10" LastChildFill="False">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <materialDesign:PackIcon Kind="CalendarMonth" Width="20" Height="20"
+          <materialDesign:PackIcon Kind="ViewDashboard" Width="20" Height="20"
                                    Foreground="{StaticResource Accent}"
                                    VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <TextBlock Text="方老师的桌面工作台" FontSize="15" FontWeight="SemiBold"
+          <TextBlock Text="方老师的工作区" FontSize="15" FontWeight="SemiBold"
                      Foreground="{StaticResource Fg}" VerticalAlignment="Center"/>
         </StackPanel>
         <Button x:Name="BtnPin" DockPanel.Dock="Right" Click="BtnPin_Click"
@@ -207,47 +208,57 @@
             </Border>
           </StackPanel>
         </Border>
+        <Border x:Name="TabCyberBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                Margin="0,0,12,0" Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabCyber_Click" Padding="0,0,0,6" ToolTip="Alt+4">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock x:Name="TabCyberText" Text="网安热点" FontSize="13" Foreground="{StaticResource Muted}"/>
+            <Border x:Name="CyberTabBadge" Visibility="Collapsed" CornerRadius="8" Height="16"
+                    MinWidth="16" Padding="5,0" Margin="6,0,0,0" Background="{StaticResource Accent}"
+                    VerticalAlignment="Center">
+              <TextBlock x:Name="CyberTabBadgeText" Text="0" FontSize="10" Foreground="White"
+                         FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+          </StackPanel>
+        </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="Alt+4 · Alt+Space 输入">
+                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="Alt+5 · Alt+Space 输入">
           <TextBlock x:Name="TabAgentText" Text="大模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
 
-      <!-- 日历：固定设计尺寸 + Viewbox 等比放大（避免宽屏把格子拉稀） -->
+      <!-- 日历：固定约 300 宽居中，高度留给待办列表 -->
       <Border x:Name="CalendarHost" DockPanel.Dock="Top" Background="White" CornerRadius="10"
               Padding="10,10,10,8" Margin="0,0,0,10" BorderBrush="#10000000" BorderThickness="1">
-        <Viewbox Stretch="Uniform" HorizontalAlignment="Stretch">
-          <!-- 固定宽高比，Dock 顶栏无限高时 Viewbox 才能按宽度放大 -->
-          <DockPanel Width="300" Height="248">
-            <Grid DockPanel.Dock="Top" Height="28" Margin="0,0,0,6">
-              <Button Content="‹" FontSize="16" Width="28" Height="28"
-                      HorizontalAlignment="Left" Click="PrevMonth_Click"
-                      Foreground="{StaticResource Muted}" Background="Transparent" BorderThickness="0"
-                      Cursor="Hand"/>
-              <TextBlock x:Name="MonthLabel" HorizontalAlignment="Center" VerticalAlignment="Center"
-                         FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource Fg}"/>
-              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                <Button Content="今天" FontSize="11" FontWeight="SemiBold"
-                        Foreground="{StaticResource Accent}" Background="Transparent" BorderThickness="0"
-                        Click="Today_Click" Padding="8,0" Height="28" Cursor="Hand"/>
-                <Button Content="›" FontSize="16" Width="28" Height="28"
-                        Click="NextMonth_Click" Foreground="{StaticResource Muted}"
-                        Background="Transparent" BorderThickness="0" Cursor="Hand"/>
-              </StackPanel>
-            </Grid>
-            <UniformGrid Rows="1" Columns="7" DockPanel.Dock="Top" Height="18" Margin="0,0,0,4">
-              <TextBlock Text="日" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="一" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="二" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="三" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="四" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="五" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-              <TextBlock Text="六" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
-            </UniformGrid>
-            <UniformGrid x:Name="DayGrid" Columns="7"/>
-          </DockPanel>
-        </Viewbox>
+        <DockPanel Width="300" HorizontalAlignment="Center">
+          <Grid DockPanel.Dock="Top" Height="28" Margin="0,0,0,6">
+            <Button Content="‹" FontSize="16" Width="28" Height="28"
+                    HorizontalAlignment="Left" Click="PrevMonth_Click"
+                    Foreground="{StaticResource Muted}" Background="Transparent" BorderThickness="0"
+                    Cursor="Hand"/>
+            <TextBlock x:Name="MonthLabel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                       FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource Fg}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <Button Content="今天" FontSize="11" FontWeight="SemiBold"
+                      Foreground="{StaticResource Accent}" Background="Transparent" BorderThickness="0"
+                      Click="Today_Click" Padding="8,0" Height="28" Cursor="Hand"/>
+              <Button Content="›" FontSize="16" Width="28" Height="28"
+                      Click="NextMonth_Click" Foreground="{StaticResource Muted}"
+                      Background="Transparent" BorderThickness="0" Cursor="Hand"/>
+            </StackPanel>
+          </Grid>
+          <UniformGrid Rows="1" Columns="7" DockPanel.Dock="Top" Height="18" Margin="0,0,0,4">
+            <TextBlock Text="日" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="一" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="二" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="三" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="四" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="五" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+            <TextBlock Text="六" HorizontalAlignment="Center" Foreground="{StaticResource Muted}" FontSize="11"/>
+          </UniformGrid>
+          <UniformGrid x:Name="DayGrid" Columns="7"/>
+        </DockPanel>
       </Border>
 
       <Grid>
@@ -304,6 +315,76 @@
               <StackPanel x:Name="TodoList" Margin="0"/>
             </ScrollViewer>
           </Border>
+        </DockPanel>
+
+        <!-- 网安热点：默认满屏；左列表、右详情（原生视口，无虚拟加宽） -->
+        <DockPanel x:Name="CyberNewsPanel" Visibility="Collapsed">
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="False">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Border x:Name="CyberModeHotBorder" BorderThickness="0,0,0,2" BorderBrush="{StaticResource Accent}"
+                      Margin="0,0,14,0" Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="CyberModeHot_Click">
+                <TextBlock x:Name="CyberModeHotText" Text="热点" FontSize="12.5" FontWeight="SemiBold"/>
+              </Border>
+              <Border x:Name="CyberModeFavBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                      Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="CyberModeFav_Click">
+                <TextBlock x:Name="CyberModeFavText" Text="收藏" FontSize="12.5"
+                           Foreground="{StaticResource Muted}"/>
+              </Border>
+            </StackPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <TextBlock x:Name="CyberNewsHint" FontSize="11" Foreground="{StaticResource Muted}"
+                         VerticalAlignment="Center" Margin="0,0,10,0"/>
+              <Button Content="刷新" Style="{StaticResource MailGhostBtn}" Height="26" Padding="8,0"
+                      Click="BtnCyberNewsRefresh_Click" ToolTip="热点：重新拉取；收藏：刷新列表"/>
+            </StackPanel>
+          </DockPanel>
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="320"/>
+              <ColumnDefinition Width="8"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="White" CornerRadius="8"
+                    BorderBrush="#10000000" BorderThickness="1">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="CyberNewsList" Margin="4,4"/>
+              </ScrollViewer>
+            </Border>
+            <Border x:Name="CyberNewsDetailHost" Grid.Column="2"
+                    Background="White" CornerRadius="10" Padding="10,8,10,10"
+                    BorderBrush="#10000000" BorderThickness="1">
+              <DockPanel>
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="True">
+                  <Button x:Name="BtnCyberNewsFav" DockPanel.Dock="Right" Content="收藏"
+                          Style="{StaticResource PrimaryBtn}" Width="72" Height="28"
+                          Click="BtnCyberNewsFav_Click" Visibility="Collapsed" Margin="8,0,0,0"/>
+                  <Button x:Name="BtnCyberNewsNext" DockPanel.Dock="Right" Content="下一条"
+                          Style="{StaticResource MailGhostBtn}" Height="28" Margin="0,0,8,0"
+                          Click="BtnCyberNewsNext_Click" ToolTip="↓ 第一条 / 下一条"/>
+                  <Button DockPanel.Dock="Right" Content="浏览器"
+                          Style="{StaticResource MailGhostBtn}" Height="28" Margin="0,0,8,0"
+                          Click="BtnCyberNewsOpen_Click" ToolTip="部分站点 WebView 打不开时用"/>
+                  <TextBlock x:Name="CyberNewsDetailSource"
+                             FontSize="11" Foreground="{StaticResource Muted}"
+                             VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                             Text="点左侧列表，或按 ↓ 打开第一条"/>
+                </DockPanel>
+                <Border CornerRadius="6" ClipToBounds="True" Background="#FFF7F7F7">
+                  <Grid>
+                    <TextBlock x:Name="CyberNewsWebHint"
+                               Text="按 ↓ 打开第一条"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{StaticResource Muted}" FontSize="12.5"/>
+                    <wv2:WebView2 x:Name="CyberNewsWeb"
+                                  DefaultBackgroundColor="#FFF7F7F7"
+                                  Visibility="Collapsed"/>
+                  </Grid>
+                </Border>
+              </DockPanel>
+            </Border>
+          </Grid>
         </DockPanel>
 
         <!-- 笔记 -->
@@ -473,7 +554,7 @@
                     </Grid>
                     <Border Height="1" Background="#12000000" Margin="0,4,0,8"/>
                   </StackPanel>
-                  <Grid>
+    <Grid>
                     <TextBox x:Name="MailBody" Style="{StaticResource PlainInput}"
                              AcceptsReturn="True" TextWrapping="Wrap" FontSize="12.5"
                              VerticalScrollBarVisibility="Auto"
@@ -590,7 +671,7 @@
           </Border>
         </DockPanel>
 
-      </Grid>
+    </Grid>
     </DockPanel>
   </Border>
 </Window>

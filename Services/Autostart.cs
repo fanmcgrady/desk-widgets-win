@@ -47,7 +47,7 @@ public static class Autostart
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ShortcutPath)!);
-            CreateShortcut(ShortcutPath, exe, Path.GetDirectoryName(exe)!, "方老师的桌面工作台");
+            CreateShortcut(ShortcutPath, exe, Path.GetDirectoryName(exe)!, "方老师的工作区");
         }
         catch
         {
@@ -74,7 +74,7 @@ public static class Autostart
         var script =
             $"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{link}');" +
             $"$s.TargetPath = '{target}'; $s.WorkingDirectory = '{work}';" +
-            "$s.Description = '方老师的桌面工作台'; $s.Save()";
+            "$s.Description = '方老师的工作区'; $s.Save()";
         var tmp = Path.Combine(Path.GetTempPath(), "deskwidgets-autostart.ps1");
         File.WriteAllText(tmp, script, Encoding.UTF8);
         Process.Start(new ProcessStartInfo

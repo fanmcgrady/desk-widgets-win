@@ -29,9 +29,14 @@ autostart.pref
 **/msal*.cache
 desk.db
 **/desk.db
-
-## Screenshots（勿提交含个人信息的截图）
-docs/screenshots/
+cyber-news-read.json
+**/cyber-news-read.json
+cyber-news-fav.json
+**/cyber-news-fav.json
+cyber-news-inbox.json
+**/cyber-news-inbox.json
+cyber-news-lastfetch.txt
+**/cyber-news-lastfetch.txt
 
 ## OS
 Thumbs.db

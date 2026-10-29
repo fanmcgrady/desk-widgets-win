@@ -12,14 +12,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="tools\**" />
-    <None Remove="tools\**" />
-    <Content Remove="tools\**" />
-    <EmbeddedResource Remove="tools\**" />
-    <Page Remove="tools\**" />
-  </ItemGroup>
-
-  <ItemGroup>
     <Content Include="Assets\agent-timeline.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
