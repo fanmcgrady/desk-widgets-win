@@ -60,54 +60,71 @@ public sealed class CursorAgentClient
         }
     }
 
-    public AgentRuntimeKind RuntimeKind
+    public AgentRuntimeKind RuntimeKind => _kind;
+
+    /// <summary>是否已完成路径探测（异步）。</summary>
+    public bool IsResolved => _resolved;
+
+    /// <summary>已缓存的显示标签；未探测完成时为 null。</summary>
+    public string? ResolveAgentPath() => _label;
+
+    private readonly object _resolveGate = new();
+    private Task? _resolveTask;
+
+    /// <summary>在线程池探测 Windows / WSL agent，勿在 UI 线程同步 Wait。</summary>
+    public Task EnsureResolvedAsync(CancellationToken ct = default)
     {
-        get
+        if (_resolved) return Task.CompletedTask;
+        lock (_resolveGate)
         {
-            EnsureResolved();
-            return _kind;
+            if (_resolved) return Task.CompletedTask;
+            _resolveTask ??= ResolveCoreAsync(ct);
+            return _resolveTask;
         }
     }
 
-    /// <summary>显示用标签，如 win:agent.exe / wsl:cursor-agent；没有则 null。</summary>
-    public string? ResolveAgentPath()
+    private async Task ResolveCoreAsync(CancellationToken ct)
     {
-        EnsureResolved();
-        return _label;
+        try
+        {
+            var win = await Task.Run(FindWindowsAgent, ct).ConfigureAwait(false);
+            if (win != null)
+            {
+                _kind = AgentRuntimeKind.Windows;
+                _windowsAgentPath = win;
+                _label = "win:" + Path.GetFileName(win);
+                return;
+            }
+
+            var (ok, wslName) = await ProbeWslAgentAsync(ct).ConfigureAwait(false);
+            if (ok)
+            {
+                _kind = AgentRuntimeKind.Wsl;
+                _label = "wsl:" + wslName;
+                return;
+            }
+
+            _kind = AgentRuntimeKind.None;
+            _label = null;
+        }
+        finally
+        {
+            _resolved = true;
+            lock (_resolveGate) _resolveTask = null;
+        }
     }
 
-    private void EnsureResolved()
-    {
-        if (_resolved) return;
-        _resolved = true;
-
-        var win = FindWindowsAgent();
-        if (win != null)
-        {
-            _kind = AgentRuntimeKind.Windows;
-            _windowsAgentPath = win;
-            _label = "win:" + Path.GetFileName(win);
-            return;
-        }
-
-        if (ProbeWslAgent(out var wslName))
-        {
-            _kind = AgentRuntimeKind.Wsl;
-            _label = "wsl:" + wslName;
-            return;
-        }
-
-        _kind = AgentRuntimeKind.None;
-        _label = null;
-    }
-
-    /// <summary>强制重新探测（装完 CLI 后点「新对话」可用）。</summary>
+    /// <summary>强制重新探测（装完 CLI 后点「新任务」可用）。</summary>
     public void Refresh()
     {
-        _resolved = false;
-        _kind = AgentRuntimeKind.None;
-        _windowsAgentPath = null;
-        _label = null;
+        lock (_resolveGate)
+        {
+            _resolved = false;
+            _resolveTask = null;
+            _kind = AgentRuntimeKind.None;
+            _windowsAgentPath = null;
+            _label = null;
+        }
     }
 
     private static string? FindWindowsAgent()
@@ -149,9 +166,9 @@ public sealed class CursorAgentClient
         yield return Path.Combine(local, "Programs", "cursor", "resources", "app", "bin");
     }
 
-    private static bool ProbeWslAgent(out string fileName)
+    private static async Task<(bool ok, string fileName)> ProbeWslAgentAsync(CancellationToken ct)
     {
-        fileName = "cursor-agent";
+        const string fallback = "cursor-agent";
         try
         {
             var psi = new ProcessStartInfo
@@ -169,27 +186,32 @@ public sealed class CursorAgentClient
             psi.ArgumentList.Add("export PATH=\"$HOME/.local/bin:$PATH\"; command -v cursor-agent || command -v agent");
 
             using var proc = Process.Start(psi);
-            if (proc == null) return false;
+            if (proc == null) return (false, fallback);
 
-            var stdout = proc.StandardOutput.ReadToEnd().Trim();
-            if (!proc.WaitForExit(12000))
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+            var exitTask = proc.WaitForExitAsync(ct);
+            // WSL 冷启动可能慢；超时杀掉，避免拖死探测
+            var finished = await Task.WhenAny(exitTask, Task.Delay(8000)).ConfigureAwait(false);
+            if (finished != exitTask && !proc.HasExited)
             {
-                try { proc.Kill(true); } catch { /* ignore */ }
-                return false;
+                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                try { await exitTask.WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false); }
+                catch { /* ignore */ }
+                return (false, fallback);
             }
 
+            await exitTask.ConfigureAwait(false);
+            var stdout = (await stdoutTask.ConfigureAwait(false)).Trim();
             if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(stdout) && stdout.Contains('/'))
-            {
-                fileName = Path.GetFileName(stdout.Replace('\\', '/'));
-                return true;
-            }
+                return (true, Path.GetFileName(stdout.Replace('\\', '/')));
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             /* WSL 不可用 */
         }
 
-        return false;
+        return (false, fallback);
     }
 
     public async Task<string> ChatAsync(
@@ -201,7 +223,7 @@ public sealed class CursorAgentClient
         Action<AgentToolCallInfo>? onTool,
         CancellationToken ct)
     {
-        EnsureResolved();
+        await EnsureResolvedAsync(ct).ConfigureAwait(false);
         return _kind switch
         {
             AgentRuntimeKind.Windows => await ChatWindowsAsync(prompt, continueSession, mode, onDelta, onLog, onTool, ct).ConfigureAwait(false),

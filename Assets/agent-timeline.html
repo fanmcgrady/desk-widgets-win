@@ -41,6 +41,103 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .welcome {
+      align-self: flex-start;
+      max-width: 96%;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 12px 10px;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+    }
+    .welcome-kicker {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-bottom: 8px;
+    }
+    .welcome-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--fg);
+      margin: 0 0 6px;
+      line-height: 1.35;
+    }
+    .welcome-meta {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.55;
+      margin: 0 0 10px;
+      word-break: break-all;
+    }
+    .welcome-meta code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--fg);
+      background: rgba(0, 0, 0, 0.04);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .welcome-section {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+      margin: 2px 0 8px;
+    }
+    .skill-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .skill-item {
+      display: grid;
+      grid-template-columns: 10px 1fr;
+      gap: 8px;
+      align-items: start;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+    }
+    .skill-dot {
+      width: 8px;
+      height: 8px;
+      margin-top: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .skill-id {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--fg);
+      line-height: 1.3;
+    }
+    .skill-desc {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-top: 2px;
+      line-height: 1.4;
+    }
+    .welcome-empty {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.03);
+    }
+    .welcome-hint {
+      margin-top: 10px;
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
     .bubble-user {
       align-self: flex-end;
       max-width: 88%;
@@ -180,6 +277,61 @@
       scrollEnd();
     }
 
+    function escapeHtml(s) {
+      return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function appendWelcome(msg) {
+      currentAssistant = null;
+      currentRail = null;
+      const el = document.createElement("div");
+      el.className = "welcome";
+
+      const ready = !!msg.ready;
+      const kicker = ready ? "Agent 已就绪" : "未检测到 Agent";
+      const title = ready
+        ? "可改文件、跑命令；直接说任务即可"
+        : "先安装并登录 agent，再点「新任务」";
+
+      let meta = "";
+      if (msg.workspace) {
+        meta += `<div>工作区 <code>${escapeHtml(msg.workspace)}</code></div>`;
+      }
+      if (ready) {
+        meta += "<div>Enter 发送 · Shift+Enter 换行</div>";
+      } else {
+        meta += "<div>Windows：irm 'https://cursor.com/install?win32=true' | iex</div>";
+        meta += "<div>或 WSL：curl https://cursor.com/install -fsS | bash</div>";
+      }
+
+      const skills = Array.isArray(msg.skills) ? msg.skills : [];
+      let skillsHtml = "";
+      if (skills.length === 0) {
+        skillsHtml = `<div class="welcome-empty">暂无 Skills（~/.cursor/skills）</div>`;
+      } else {
+        skillsHtml = `<ul class="skill-list">` + skills.map((s) => {
+          const id = escapeHtml(s.id || s.Id || "skill");
+          const desc = escapeHtml(s.summary || s.Summary || "");
+          return `<li class="skill-item"><span class="skill-dot"></span><div><div class="skill-id">${id}</div><div class="skill-desc">${desc}</div></div></li>`;
+        }).join("") + `</ul>`;
+      }
+
+      el.innerHTML =
+        `<span class="welcome-kicker">${escapeHtml(kicker)}</span>` +
+        `<div class="welcome-title">${escapeHtml(title)}</div>` +
+        `<div class="welcome-meta">${meta}</div>` +
+        `<div class="welcome-section">可用 Skills</div>` +
+        skillsHtml +
+        `<div class="welcome-hint">直接说触发词，例如「归档报账」「整理报销」「写立项必要性」。</div>`;
+
+      root.appendChild(el);
+      scrollEnd();
+    }
+
     function appendUser(text) {
       currentAssistant = null;
       currentRail = null;
@@ -290,6 +442,7 @@
       switch (msg.op) {
         case "clear": clearAll(); break;
         case "system": appendSystem(msg.text); break;
+        case "welcome": appendWelcome(msg); break;
         case "user": appendUser(msg.text); break;
         case "delta": appendDelta(msg.text); break;
         case "seal": sealAssistant(msg.html || ""); break;

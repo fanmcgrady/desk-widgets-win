@@ -3,10 +3,12 @@ bin/
 obj/
 [Bb]uild/
 [Oo]ut/
+publish/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+*.WebView2/
 
 ## IDE
 .vs/

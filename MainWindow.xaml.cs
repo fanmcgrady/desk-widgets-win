@@ -26,12 +26,15 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
+    /// <summary>收起贴边条宽度。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>邮件阅读/写信加宽，便于看 HTML 正文。</summary>
+    /// <summary>展开统一宽度（与大模型一致）。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 8;
     /// <summary>右缘顶部死区（约等于最大化窗口关闭按钮高度），避免关窗时误触展开。</summary>
     private const int TopEdgeDeadZoneDip = 56;
+    /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
+    private const int EdgeExpandDwellMs = 320;
 
     private enum TabMode { Note, Todo, Mail, Agent }
 
@@ -46,6 +49,7 @@ public partial class MainWindow : Window
     private bool _agentHasSession;
     private bool _agentBusy;
     private bool _agentTimelineReady;
+    private Task? _agentTimelineInitTask;
     private bool _agentWelcomeShown;
     private bool _agentStreaming;
     private string _agentStreamText = "";
@@ -66,6 +70,34 @@ public partial class MainWindow : Window
     private DispatcherTimer? _displayDebounce;
     private WinForms.NotifyIcon? _tray;
     private DrawingIcon? _trayIcon;
+    private HwndSource? _hwndSource;
+    private bool _agentHotkeyRegistered;
+    private bool _doubleShiftHookInstalled;
+    private IntPtr _keyboardHook = IntPtr.Zero;
+    private LowLevelKeyboardProc? _keyboardProc; // 防 GC 回收
+    private bool _shiftHeld;
+    private bool _shiftChorded; // 按住 Shift 期间按过别的键
+    private DateTime _shiftDownUtc = DateTime.MinValue;
+    private DateTime _lastShiftTapUtc = DateTime.MinValue;
+
+    // 全局唤醒：连按两下 Shift；大模型输入：Alt+Space
+    private const int HotkeyIdAgent = 0xD502;
+    private const uint ModAlt = 0x0001;
+    private const uint ModNoRepeat = 0x4000;
+    private const uint WmHotkey = 0x0312;
+    private const uint VkSpace = 0x20;
+    private const int WhKeyboardLl = 13;
+    private const int WmKeyDown = 0x0100;
+    private const int WmKeyUp = 0x0101;
+    private const int WmSysKeyDown = 0x0104;
+    private const int WmSysKeyUp = 0x0105;
+    private const uint VkShift = 0x10;
+    private const uint VkLShift = 0xA0;
+    private const uint VkRShift = 0xA1;
+    /// <summary>单次 Shift 轻点最长按住时间。</summary>
+    private static readonly TimeSpan ShiftTapMaxHold = TimeSpan.FromMilliseconds(400);
+    /// <summary>两次轻点间隔上限。</summary>
+    private static readonly TimeSpan DoubleShiftWindow = TimeSpan.FromMilliseconds(450);
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
     /// <summary>投屏/分辨率抖动期间禁止自动换屏，避免侧栏跳来跳去。</summary>
@@ -80,6 +112,8 @@ public partial class MainWindow : Window
     private bool _pinned;
     private bool _allowClose;
     private DateTime? _leaveSince;
+    /// <summary>贴右缘开始计时，满 dwell 才 Expand。</summary>
+    private DateTime? _edgeHoverSince;
     /// <summary>托盘打开后：鼠标尚未进入侧栏前不自动收起，避免一点开就被 EdgeTimer 关掉。</summary>
     private bool _awaitPanelEnter;
     private int _year;
@@ -89,6 +123,10 @@ public partial class MainWindow : Window
     private bool _showDone;
     private bool _filterByDay;
     private bool _inputFocused;
+    /// <summary>行内编辑等：Esc 优先取消，而不是只清焦点。</summary>
+    private Action? _inlineEscCancel;
+    /// <summary>输入框里已按过一次 Esc；再按则收起（避免 NoteEdit 抢回焦点后两段 Esc 失效）。</summary>
+    private bool _escDismissArmed;
     private bool _syncing;
 
     private string? _activeNoteId;
@@ -148,6 +186,7 @@ public partial class MainWindow : Window
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _dockScreen = PickDefaultDockScreen();
         Expand();
+        RegisterWakeHotkey();
         _edgeTimer.Start();
         _syncTimer.Start();
         _mailPollTimer.Start();
@@ -200,8 +239,53 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool MoveWindow(IntPtr hWnd, int x, int y, int nWidth, int nHeight, bool bRepaint);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KbdLlHookStruct
+    {
+        public uint VkCode;
+        public uint ScanCode;
+        public uint Flags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(NativePoint pt, uint dwFlags);
@@ -261,6 +345,45 @@ public partial class MainWindow : Window
         return null;
     }
 
+    /// <summary>
+    /// 前台是其他应用的全屏/最大化窗口且盖住右缘时，禁止贴边自动展开，
+    /// 避免看视频、玩游戏、滚右侧滚动条时误开侧栏。托盘仍可手动展开。
+    /// </summary>
+    private bool ShouldSuppressEdgeExpand(WinForms.Screen screen)
+    {
+        EnsureHwnd();
+        var self = new WindowInteropHelper(this).Handle;
+        var fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero || fg == self) return false;
+
+        var cls = new System.Text.StringBuilder(64);
+        if (GetClassName(fg, cls, cls.Capacity) > 0)
+        {
+            var name = cls.ToString();
+            // 桌面 / 任务栏不算遮挡
+            if (name is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
+                return false;
+        }
+
+        if (!GetWindowRect(fg, out var r)) return false;
+        var b = screen.Bounds;
+        var wa = screen.WorkingArea;
+        var scale = DpiScale(screen);
+        var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
+
+        // 真全屏：盖满整块显示器（含任务栏区域）
+        var coversBounds = r.Left <= b.Left + 4 && r.Top <= b.Top + 4
+                           && r.Right >= b.Right - 4 && r.Bottom >= b.Bottom - 4;
+        // 最大化：盖满工作区
+        var coversWork = IsZoomed(fg)
+                         || (r.Left <= wa.Left + 4 && r.Top <= wa.Top + 4
+                             && r.Right >= wa.Right - 4 && r.Bottom >= wa.Bottom - 4);
+        // 窗口右缘压住贴边热区（滚动条常在这里）
+        var coversRightHit = r.Right >= wa.Right - hit && r.Left < wa.Right - hit;
+
+        return (coversBounds || coversWork) && coversRightHit;
+    }
+
     private void EnsureHwnd()
     {
         var helper = new WindowInteropHelper(this);
@@ -268,10 +391,7 @@ public partial class MainWindow : Window
             helper.EnsureHandle();
     }
 
-    private double ActivePanelWidthDip =>
-        _tab == TabMode.Mail && _mailView is MailView.Read or MailView.Compose
-            ? PanelWidthMailDip
-            : PanelWidthDip;
+    private double ActivePanelWidthDip => PanelWidthMailDip;
 
     private void PlaceOnScreen(WinForms.Screen screen, bool expanded)
     {
@@ -344,11 +464,169 @@ public partial class MainWindow : Window
         Expand();
     }
 
+    /// <summary>连按两下 Shift：收起时展开；已展开且在前台则收起；否则置顶唤醒。</summary>
+    private void ToggleWakeFromHotkey()
+    {
+        if (_expanded && IsActive && !_pinned)
+        {
+            Collapse();
+            return;
+        }
+        if (_expanded)
+        {
+            Activate();
+            Topmost = true;
+            return;
+        }
+        ExpandFromTray();
+    }
+
+    private void RegisterWakeHotkey()
+    {
+        EnsureHwnd();
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+
+        _hwndSource = HwndSource.FromHwnd(hwnd);
+        _hwndSource?.AddHook(WndProc);
+
+        InstallDoubleShiftHook();
+        _agentHotkeyRegistered = RegisterHotKey(hwnd, HotkeyIdAgent, ModAlt | ModNoRepeat, VkSpace)
+                                 || RegisterHotKey(hwnd, HotkeyIdAgent, ModAlt, VkSpace);
+        UpdateTrayHotkeyTip();
+    }
+
+    private void InstallDoubleShiftHook()
+    {
+        if (_doubleShiftHookInstalled) return;
+        _keyboardProc = DoubleShiftHookCallback;
+        using var proc = Process.GetCurrentProcess();
+        using var mod = proc.MainModule;
+        var hMod = GetModuleHandle(mod?.ModuleName);
+        _keyboardHook = SetWindowsHookEx(WhKeyboardLl, _keyboardProc, hMod, 0);
+        _doubleShiftHookInstalled = _keyboardHook != IntPtr.Zero;
+    }
+
+    private void UninstallDoubleShiftHook()
+    {
+        if (_keyboardHook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_keyboardHook);
+            _keyboardHook = IntPtr.Zero;
+        }
+        _keyboardProc = null;
+        _doubleShiftHookInstalled = false;
+        _shiftHeld = false;
+        _shiftChorded = false;
+        _lastShiftTapUtc = DateTime.MinValue;
+    }
+
+    private static bool IsShiftVk(uint vk) =>
+        vk is VkShift or VkLShift or VkRShift;
+
+    private IntPtr DoubleShiftHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var info = Marshal.PtrToStructure<KbdLlHookStruct>(lParam);
+            var msg = wParam.ToInt32();
+            var down = msg is WmKeyDown or WmSysKeyDown;
+            var up = msg is WmKeyUp or WmSysKeyUp;
+
+            if (IsShiftVk(info.VkCode))
+            {
+                if (down && !_shiftHeld)
+                {
+                    _shiftHeld = true;
+                    _shiftChorded = false;
+                    _shiftDownUtc = DateTime.UtcNow;
+                }
+                else if (up && _shiftHeld)
+                {
+                    _shiftHeld = false;
+                    var held = DateTime.UtcNow - _shiftDownUtc;
+                    if (!_shiftChorded && held <= ShiftTapMaxHold)
+                        OnShiftTap();
+                    _shiftChorded = false;
+                }
+            }
+            else if (down && _shiftHeld)
+            {
+                // Shift + 其它键：不算轻点
+                _shiftChorded = true;
+                _lastShiftTapUtc = DateTime.MinValue;
+            }
+        }
+        return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+    }
+
+    private void OnShiftTap()
+    {
+        var now = DateTime.UtcNow;
+        if (_lastShiftTapUtc != DateTime.MinValue
+            && now - _lastShiftTapUtc <= DoubleShiftWindow)
+        {
+            _lastShiftTapUtc = DateTime.MinValue;
+            Dispatcher.BeginInvoke(ToggleWakeFromHotkey);
+            return;
+        }
+        _lastShiftTapUtc = now;
+    }
+
+    private void UpdateTrayHotkeyTip()
+    {
+        if (_tray == null) return;
+        var parts = new List<string> { "方老师的桌面工作台" };
+        if (_doubleShiftHookInstalled) parts.Add("连按两下 Shift");
+        if (_agentHotkeyRegistered) parts.Add("Alt+Space 大模型");
+        _tray.Text = string.Join(" · ", parts);
+    }
+
+    /// <summary>全局热键 Alt+Space：展开侧栏并切到大模型输入框。</summary>
+    private void FocusAgentInputFromHotkey()
+    {
+        if (!_expanded) ExpandFromTray();
+        else
+        {
+            Activate();
+            Topmost = true;
+        }
+        InvokeTabClick(TabAgent_Click);
+    }
+
+    private void UnregisterWakeHotkey()
+    {
+        UninstallDoubleShiftHook();
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero && _agentHotkeyRegistered)
+        {
+            UnregisterHotKey(hwnd, HotkeyIdAgent);
+            _agentHotkeyRegistered = false;
+        }
+        if (_hwndSource != null)
+        {
+            _hwndSource.RemoveHook(WndProc);
+            _hwndSource = null;
+        }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if ((uint)msg == WmHotkey && wParam.ToInt32() == HotkeyIdAgent)
+        {
+            handled = true;
+            Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+        }
+        return IntPtr.Zero;
+    }
+
     private void Collapse()
     {
         FlushNoteSave();
         _expanded = false;
         _pinned = false;
+        _escDismissArmed = false;
+        _inputFocused = false;
         UpdatePinButton();
         _leaveSince = null;
         _awaitPanelEnter = false;
@@ -397,16 +675,35 @@ public partial class MainWindow : Window
 
         if (!_expanded)
         {
-            if (edgeScreen == null) return;
+            if (edgeScreen == null)
+            {
+                _edgeHoverSince = null;
+                return;
+            }
             // 投屏抖动时：只响应当前停靠屏（或尚无停靠时的主屏）右缘，避免跳到虚拟/镜像屏
             if (dockLocked)
             {
                 var prefer = ResolveScreen(_dockScreen) ?? WinForms.Screen.PrimaryScreen;
                 if (prefer != null && edgeScreen.DeviceName != prefer.DeviceName)
+                {
+                    _edgeHoverSince = null;
                     return;
+                }
             }
+            // 其他应用全屏/最大化盖住右缘：不贴边展开（托盘仍可开）
+            if (ShouldSuppressEdgeExpand(edgeScreen))
+            {
+                _edgeHoverSince = null;
+                return;
+            }
+            // 需在右缘停留一小段时间，减少路过或滚轮时误触
+            _edgeHoverSince ??= DateTime.UtcNow;
+            if ((DateTime.UtcNow - _edgeHoverSince.Value).TotalMilliseconds < EdgeExpandDwellMs)
+                return;
+
             _dockScreen = edgeScreen;
             _awaitPanelEnter = false;
+            _edgeHoverSince = null;
             Expand();
             return;
         }
@@ -547,7 +844,48 @@ public partial class MainWindow : Window
         }
 
         if (e.Key != Key.Escape) return;
-        if (_inputFocused) return;
+
+        // 行内改标题等：Esc 取消编辑
+        if (_inlineEscCancel != null)
+        {
+            var cancel = _inlineEscCancel;
+            _inlineEscCancel = null;
+            cancel();
+            _inputFocused = false;
+            _escDismissArmed = false;
+            e.Handled = true;
+            return;
+        }
+
+        // 输入框内：空的快捷输入一次 Esc 收起；否则先退出焦点，再按一次才收起
+        // _escDismissArmed：笔记等大输入框清焦点后常被 FocusScope 抢回，靠标记保证第二次 Esc 能收起
+        if (_inputFocused && !_escDismissArmed)
+        {
+            var focused = Keyboard.FocusedElement as DependencyObject;
+            var inNote = ReferenceEquals(focused, NoteEdit)
+                         || (focused != null && IsDescendantOf(focused, NoteEdit));
+            var emptyQuick =
+                (ReferenceEquals(focused, TodoInput) && string.IsNullOrWhiteSpace(TodoInput.Text))
+                || (ReferenceEquals(focused, AgentInput) && string.IsNullOrWhiteSpace(AgentInput.Text));
+
+            BlurInputFocus();
+            if (!emptyQuick)
+            {
+                _escDismissArmed = true;
+                e.Handled = true;
+                // 笔记：第一次 Esc 直接收起更顺手（已自动保存）
+                if (inNote)
+                {
+                    _escDismissArmed = false;
+                    Collapse();
+                }
+                return;
+            }
+            // 空输入：继续往下走收起逻辑
+        }
+
+        _escDismissArmed = false;
+
         // 钉子：Esc 取消固定并隐藏
         if (_pinned)
         {
@@ -564,6 +902,26 @@ public partial class MainWindow : Window
         }
         Collapse();
         e.Handled = true;
+    }
+
+    private void BlurInputFocus()
+    {
+        _inputFocused = false;
+        FocusManager.SetFocusedElement(this, this);
+        Keyboard.ClearFocus();
+        Focusable = true;
+        Keyboard.Focus(this);
+    }
+
+    private static bool IsDescendantOf(DependencyObject? node, DependencyObject ancestor)
+    {
+        while (node != null)
+        {
+            if (ReferenceEquals(node, ancestor)) return true;
+            node = VisualTreeHelper.GetParent(node)
+                   ?? (node is FrameworkElement fe ? fe.Parent as DependencyObject : null);
+        }
+        return false;
     }
 
     /// <summary>鼠标侧键回退（XButton1）在阅读邮件时返回列表。</summary>
@@ -587,34 +945,67 @@ public partial class MainWindow : Window
         };
         var menu = new WinForms.ContextMenuStrip
         {
-            Font = new System.Drawing.Font("Microsoft YaHei UI", 9f),
+            Font = new System.Drawing.Font("Microsoft YaHei UI", 9.5f),
             ShowImageMargin = false,
+            ShowCheckMargin = true,
             RenderMode = WinForms.ToolStripRenderMode.Professional,
-            BackColor = DrawingColor.FromArgb(255, 250, 250, 250),
-            ForeColor = DrawingColor.FromArgb(255, 28, 27, 31),
+            BackColor = TrayTheme.Panel,
+            ForeColor = TrayTheme.Fg,
+            Padding = new WinForms.Padding(4, 4, 4, 4),
         };
         menu.Renderer = new TrayMenuRenderer();
-        menu.Items.Add("展开侧栏", null, (_, _) => Dispatcher.Invoke(ExpandFromTray));
-        menu.Items.Add("收起侧栏", null, (_, _) => Dispatcher.Invoke(Collapse));
-        menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add("登录并同步", null, async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
-        menu.Items.Add("打开同步配置", null, (_, _) => Dispatcher.Invoke(OpenSyncConfig));
-        menu.Items.Add("退出微软账号", null, async (_, _) =>
+        void AddItem(string text, EventHandler onClick)
+        {
+            var item = new WinForms.ToolStripMenuItem(text)
+            {
+                ForeColor = TrayTheme.Fg,
+                BackColor = TrayTheme.Panel,
+                Padding = new WinForms.Padding(2, 4, 8, 4),
+            };
+            item.Click += onClick;
+            menu.Items.Add(item);
+        }
+        AddItem("展开侧栏\t连按两下 Shift", (_, _) => Dispatcher.Invoke(ExpandFromTray));
+        AddItem("大模型输入\tAlt+Space", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
+        AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
+        menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
+        AddItem("登录并同步", async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
+        AddItem("打开同步配置", (_, _) => Dispatcher.Invoke(OpenSyncConfig));
+        AddItem("退出微软账号", async (_, _) =>
         {
             await _sync.SignOutAsync();
             Dispatcher.Invoke(UpdateSyncHint);
         });
-        menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add("邮箱设置", null, (_, _) => Dispatcher.Invoke(OpenMailSettingsFromTray));
+        menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
+        AddItem("邮箱设置", (_, _) => Dispatcher.Invoke(OpenMailSettingsFromTray));
+        var pin = new WinForms.ToolStripMenuItem("钉住侧栏")
+        {
+            ForeColor = TrayTheme.Fg,
+            BackColor = TrayTheme.Panel,
+            Padding = new WinForms.Padding(2, 4, 8, 4),
+        };
+        pin.Click += (_, _) => Dispatcher.Invoke(() =>
+        {
+            BtnPin_Click(this, new RoutedEventArgs());
+            pin.Checked = _pinned;
+        });
         var auto = new WinForms.ToolStripMenuItem("开机自启")
         {
-            Checked = Autostart.IsEnabled(),
             CheckOnClick = true,
+            ForeColor = TrayTheme.Fg,
+            BackColor = TrayTheme.Panel,
+            Padding = new WinForms.Padding(2, 4, 8, 4),
         };
         auto.CheckedChanged += (_, _) => Autostart.SetEnabled(auto.Checked);
+        menu.Opening += (_, _) =>
+        {
+            pin.Checked = _pinned;
+            auto.Checked = Autostart.IsEnabled();
+        };
+        menu.Items.Add(pin);
         menu.Items.Add(auto);
-        menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(Quit));
+        menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
+        AddItem("退出", (_, _) => Dispatcher.Invoke(Quit));
         _tray.ContextMenuStrip = menu;
         // 左键单击 / 双击：展开；已展开则置顶。右键仍出菜单。
         _tray.MouseClick += (_, e) =>
@@ -707,40 +1098,118 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern bool DestroyIcon(IntPtr handle);
 
-    /// <summary>托盘菜单：悬停用主界面紫色软底。</summary>
+    /// <summary>与 App.xaml 主界面色板对齐：Panel / Fg / Accent / AccentSoft / Line。</summary>
+    private static class TrayTheme
+    {
+        public static readonly DrawingColor Panel = DrawingColor.White;                         // Panel #FFFFFF
+        public static readonly DrawingColor Fg = DrawingColor.FromArgb(0x1C, 0x1B, 0x1F);      // Fg
+        public static readonly DrawingColor Muted = DrawingColor.FromArgb(0x60, 0x5E, 0x5C);   // Muted
+        public static readonly DrawingColor Accent = DrawingColor.FromArgb(0x00, 0x78, 0xD4);  // Accent
+        public static readonly DrawingColor AccentSoft = DrawingColor.FromArgb(0xDE, 0xEC, 0xF9);
+        public static readonly DrawingColor Hover = DrawingColor.FromArgb(0x14, 0x00, 0x78, 0xD4); // Hover
+        public static readonly DrawingColor Line = DrawingColor.FromArgb(0x1F, 0x00, 0x00, 0x00);
+        public static readonly DrawingColor Border = DrawingColor.FromArgb(0x28, 0x00, 0x00, 0x00);
+    }
+
+    /// <summary>托盘菜单：白底、微软蓝悬停/勾选，贴近侧栏观感。</summary>
     private sealed class TrayMenuRenderer : WinForms.ToolStripProfessionalRenderer
     {
-        public TrayMenuRenderer() : base(new TrayColorTable()) { }
+        public TrayMenuRenderer() : base(new TrayColorTable())
+        {
+            RoundedEdges = false;
+        }
+
+        protected override void OnRenderToolStripBackground(WinForms.ToolStripRenderEventArgs e)
+        {
+            using var brush = new System.Drawing.SolidBrush(TrayTheme.Panel);
+            e.Graphics.FillRectangle(brush, e.AffectedBounds);
+        }
+
+        protected override void OnRenderToolStripBorder(WinForms.ToolStripRenderEventArgs e)
+        {
+            using var pen = new System.Drawing.Pen(TrayTheme.Border);
+            var r = e.AffectedBounds;
+            e.Graphics.DrawRectangle(pen, r.X, r.Y, r.Width - 1, r.Height - 1);
+        }
+
+        protected override void OnRenderMenuItemBackground(WinForms.ToolStripItemRenderEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var bounds = new System.Drawing.Rectangle(2, 0, e.Item.Width - 4, e.Item.Height);
+            // 仅悬停铺软蓝底；已勾选不加底色，靠左侧对勾区分
+            var fill = e.Item.Selected ? TrayTheme.AccentSoft : TrayTheme.Panel;
+            using var brush = new System.Drawing.SolidBrush(fill);
+            FillRoundRect(g, brush, bounds.X, bounds.Y + 1, bounds.Width, bounds.Height - 2, 6);
+        }
 
         protected override void OnRenderItemText(WinForms.ToolStripItemTextRenderEventArgs e)
         {
-            e.TextFont = new System.Drawing.Font("Microsoft YaHei UI", 9f);
+            // 文字保持正文色；仅悬停时用 Accent，避免勾选项整行发蓝抢戏
+            e.TextFont = new System.Drawing.Font("Microsoft YaHei UI", 9.5f);
+            e.TextColor = e.Item.Selected ? TrayTheme.Accent : TrayTheme.Fg;
             base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderSeparator(WinForms.ToolStripSeparatorRenderEventArgs e)
+        {
+            var y = e.Item.ContentRectangle.Top + e.Item.ContentRectangle.Height / 2;
+            using var pen = new System.Drawing.Pen(TrayTheme.Line);
+            e.Graphics.DrawLine(pen, 10, y, e.Item.Width - 10, y);
+        }
+
+        protected override void OnRenderImageMargin(WinForms.ToolStripRenderEventArgs e)
+        {
+            using var brush = new System.Drawing.SolidBrush(TrayTheme.Panel);
+            e.Graphics.FillRectangle(brush, e.AffectedBounds);
+        }
+
+        protected override void OnRenderItemCheck(WinForms.ToolStripItemImageRenderEventArgs e)
+        {
+            // 不画系统默认勾选框底，只留细对勾，贴近 Fluent 菜单
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+            var cx = e.Item.ContentRectangle.X + 12;
+            var cy = e.Item.ContentRectangle.Y + e.Item.Height / 2;
+            using var pen = new System.Drawing.Pen(TrayTheme.Accent, 1.8f)
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round,
+            };
+            g.DrawLines(pen, new[]
+            {
+                new DrawingPoint(cx - 4, cy),
+                new DrawingPoint(cx - 1, cy + 3),
+                new DrawingPoint(cx + 5, cy - 4),
+            });
         }
     }
 
     private sealed class TrayColorTable : WinForms.ProfessionalColorTable
     {
-        private static readonly DrawingColor Soft = DrawingColor.FromArgb(222, 236, 249);
-        private static readonly DrawingColor SoftHover = DrawingColor.FromArgb(200, 224, 242);
-        private static readonly DrawingColor Bg = DrawingColor.FromArgb(250, 250, 250);
-
-        public override DrawingColor MenuItemSelected => SoftHover;
-        public override DrawingColor MenuItemSelectedGradientBegin => Soft;
-        public override DrawingColor MenuItemSelectedGradientEnd => SoftHover;
-        public override DrawingColor MenuItemBorder => DrawingColor.FromArgb(0, 120, 212);
-        public override DrawingColor MenuBorder => DrawingColor.FromArgb(40, 0, 0, 0);
-        public override DrawingColor ToolStripDropDownBackground => Bg;
-        public override DrawingColor ImageMarginGradientBegin => Bg;
-        public override DrawingColor ImageMarginGradientMiddle => Bg;
-        public override DrawingColor ImageMarginGradientEnd => Bg;
-        public override DrawingColor SeparatorDark => DrawingColor.FromArgb(30, 0, 0, 0);
-        public override DrawingColor SeparatorLight => DrawingColor.FromArgb(20, 0, 0, 0);
+        public override DrawingColor MenuItemSelected => TrayTheme.AccentSoft;
+        public override DrawingColor MenuItemSelectedGradientBegin => TrayTheme.AccentSoft;
+        public override DrawingColor MenuItemSelectedGradientEnd => TrayTheme.AccentSoft;
+        public override DrawingColor MenuItemBorder => TrayTheme.AccentSoft;
+        public override DrawingColor MenuBorder => TrayTheme.Border;
+        public override DrawingColor ToolStripDropDownBackground => TrayTheme.Panel;
+        public override DrawingColor ImageMarginGradientBegin => TrayTheme.Panel;
+        public override DrawingColor ImageMarginGradientMiddle => TrayTheme.Panel;
+        public override DrawingColor ImageMarginGradientEnd => TrayTheme.Panel;
+        public override DrawingColor SeparatorDark => TrayTheme.Line;
+        public override DrawingColor SeparatorLight => TrayTheme.Panel;
+        public override DrawingColor CheckBackground => TrayTheme.AccentSoft;
+        public override DrawingColor CheckSelectedBackground => TrayTheme.AccentSoft;
+        public override DrawingColor CheckPressedBackground => TrayTheme.AccentSoft;
     }
 
     private void Quit()
     {
         FlushNoteSave();
+        UnregisterWakeHotkey();
         _noteWatcher?.Dispose();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _edgeTimer.Stop();
@@ -800,7 +1269,7 @@ public partial class MainWindow : Window
         DayGrid.Children.Clear();
         var counts = _store.DayTodoCounts(_year, _month);
         var first = new DateTime(_year, _month, 1);
-        int start = (int)first.DayOfWeek; // 周日为一周起点（对齐设计图）
+        int start = (int)first.DayOfWeek; // 周日为一周起点
         int days = DateTime.DaysInMonth(_year, _month);
         int cells = (int)Math.Ceiling((start + days) / 7.0) * 7;
         var today = DateTime.Today;
@@ -809,24 +1278,17 @@ public partial class MainWindow : Window
         var muted = (MediaBrush)FindResource("Muted");
         var fg = (MediaBrush)FindResource("Fg");
 
+        // 去掉默认 Button 铬，避免宽屏下悬停蓝块把格子撑丑
+        var bareBtn = new ControlTemplate(typeof(WpfButton));
+        bareBtn.VisualTree = new FrameworkElementFactory(typeof(ContentPresenter));
+
         for (int i = 0; i < cells; i++)
         {
             int dayNum = i - start + 1;
-            var btn = new WpfButton
-            {
-                Height = 28,
-                Margin = new Thickness(0),
-                BorderThickness = new Thickness(0),
-                Background = MediaBrushes.Transparent,
-                Cursor = WpfCursors.Hand,
-                Padding = new Thickness(0),
-            };
-
             DateTime date;
             bool inMonth = dayNum >= 1 && dayNum <= days;
             if (!inMonth)
             {
-                // 淡显邻月日期
                 if (dayNum < 1)
                     date = first.AddDays(dayNum - 1);
                 else
@@ -840,47 +1302,81 @@ public partial class MainWindow : Window
             counts.TryGetValue(key, out int count);
             bool hasDot = count > 0 && inMonth;
 
-            // 选中：实心圆 + 白字；今天未选：描边圆；有事：圆下小点
             MediaBrush numFg;
-            if (!inMonth) numFg = muted;
-            else if (isSel) numFg = MediaBrushes.White;
-            else if (isToday) numFg = accent;
-            else numFg = fg;
+            MediaBrush chipBg;
+            if (!inMonth)
+            {
+                numFg = muted;
+                chipBg = MediaBrushes.Transparent;
+            }
+            else if (isSel)
+            {
+                numFg = MediaBrushes.White;
+                chipBg = accent;
+            }
+            else if (isToday)
+            {
+                numFg = accent;
+                chipBg = accentSoft;
+            }
+            else
+            {
+                numFg = fg;
+                chipBg = MediaBrushes.Transparent;
+            }
+
+            var num = new TextBlock
+            {
+                Text = date.Day.ToString(),
+                FontSize = 13,
+                FontWeight = isSel || isToday ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = numFg,
+                HorizontalAlignment = WpfHorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, hasDot ? 2 : 0),
+            };
+
+            var chipInner = new Grid();
+            chipInner.Children.Add(num);
+            if (hasDot)
+            {
+                chipInner.Children.Add(new System.Windows.Shapes.Ellipse
+                {
+                    Width = 4,
+                    Height = 4,
+                    Fill = isSel ? MediaBrushes.White : accent,
+                    HorizontalAlignment = WpfHorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                    Margin = new Thickness(0, 0, 0, 3),
+                });
+            }
 
             var dayChrome = new Border
             {
-                Width = 26,
-                Height = 26,
-                CornerRadius = new CornerRadius(13),
-                Background = isSel ? accent : MediaBrushes.Transparent,
-                BorderBrush = isToday && !isSel ? accent : MediaBrushes.Transparent,
-                BorderThickness = new Thickness(isToday && !isSel ? 1.5 : 0),
-                Child = new TextBlock
-                {
-                    Text = date.Day.ToString(),
-                    FontSize = 12,
-                    FontWeight = isSel || isToday ? FontWeights.SemiBold : FontWeights.Normal,
-                    Foreground = numFg,
-                    HorizontalAlignment = WpfHorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                },
+                Width = 32,
+                Height = 32,
+                CornerRadius = new CornerRadius(16),
+                Background = chipBg,
+                BorderBrush = MediaBrushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Opacity = inMonth ? 1 : 0.4,
+                Child = chipInner,
+                HorizontalAlignment = WpfHorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
             };
 
-            var stack = new StackPanel { HorizontalAlignment = WpfHorizontalAlignment.Center };
-            stack.Children.Add(dayChrome);
-            stack.Children.Add(new System.Windows.Shapes.Ellipse
+            var btn = new WpfButton
             {
-                Width = 3.5,
-                Height = 3.5,
-                Margin = new Thickness(0, 2, 0, 0),
-                Fill = hasDot
-                    ? (isSel ? accentSoft : accent)
-                    : MediaBrushes.Transparent,
-                HorizontalAlignment = WpfHorizontalAlignment.Center,
-            });
-
-            btn.Height = 34;
-            btn.Content = stack;
+                Margin = new Thickness(0),
+                Padding = new Thickness(0),
+                BorderThickness = new Thickness(0),
+                Background = MediaBrushes.Transparent,
+                Cursor = WpfCursors.Hand,
+                Template = bareBtn,
+                Content = dayChrome,
+                HorizontalContentAlignment = WpfHorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+            };
 
             var capture = date;
             btn.Click += (_, _) =>
@@ -987,8 +1483,9 @@ public partial class MainWindow : Window
 
     private async Task EnterAgentTabAsync()
     {
+        AgentStatus.Text = "加载时间线…";
         await EnsureAgentTimelineAsync();
-        EnsureAgentWelcome();
+        await EnsureAgentWelcomeAsync();
         AgentInput.Focus();
     }
 
@@ -1807,13 +2304,20 @@ public partial class MainWindow : Window
         AgentPanel.Visibility = _tab == TabMode.Agent ? Visibility.Visible : Visibility.Collapsed;
         // 日历只在「待办事项」显示
         CalendarHost.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
+        if (_expanded) PlaceExpanded();
     }
 
     // ----- 大模型（cursor agent · WebView 时间线） -----
 
-    private async Task EnsureAgentTimelineAsync()
+    private Task EnsureAgentTimelineAsync()
     {
-        if (_agentTimelineReady && AgentTimeline.CoreWebView2 != null) return;
+        if (_agentTimelineReady && AgentTimeline.CoreWebView2 != null)
+            return Task.CompletedTask;
+        return _agentTimelineInitTask ??= InitAgentTimelineCoreAsync();
+    }
+
+    private async Task InitAgentTimelineCoreAsync()
+    {
         try
         {
             await AgentTimeline.EnsureCoreWebView2Async();
@@ -1846,6 +2350,7 @@ public partial class MainWindow : Window
         {
             AgentStatus.Text = "时间线加载失败：" + ShortErr(ex);
             _agentTimelineReady = false;
+            _agentTimelineInitTask = null;
         }
     }
 
@@ -1862,28 +2367,43 @@ public partial class MainWindow : Window
     private static string AgentMarkdownToHtml(string markdown) =>
         Markdown.ToHtml(markdown ?? "", AgentMdPipeline);
 
-    private void EnsureAgentWelcome()
+    private async Task EnsureAgentWelcomeAsync()
     {
-        UpdateAgentStatusLine();
-        if (_agentWelcomeShown) return;
-        var path = _agent.ResolveAgentPath();
+        if (_agentWelcomeShown)
+        {
+            UpdateAgentStatusLine();
+            return;
+        }
+
+        AgentStatus.Text = "检测 agent…";
         var ws = CursorAgentClient.WorkspaceDir;
-        var skills = AgentSkillCatalog.FormatWelcomeBlock();
-        if (path != null)
+        // 探测 WSL / 扫 skills 都放到后台，避免卡死 UI
+        var resolveTask = _agent.EnsureResolvedAsync();
+        var skillsTask = Task.Run(AgentSkillCatalog.List);
+        await Task.WhenAll(resolveTask, skillsTask);
+
+        var path = _agent.ResolveAgentPath();
+        var skills = (await skillsTask)
+            .Select(s => new { id = s.Id, summary = s.Summary })
+            .ToList();
+        PostAgentUi(new
         {
-            AppendAgentSystem(
-                $"Agent 模式（可改文件、跑命令）。\n工作区：{ws}\nEnter 发送，Shift+Enter 换行。\n\n{skills}");
-        }
-        else
-        {
-            AppendAgentSystem(
-                "未找到 agent。优先装 Windows 版：\nirm 'https://cursor.com/install?win32=true' | iex\n或 WSL：\ncurl https://cursor.com/install -fsS | bash\n然后 agent login，再点「新任务」。\n\n" + skills);
-        }
+            op = "welcome",
+            ready = path != null,
+            workspace = ws,
+            skills,
+        });
         _agentWelcomeShown = true;
+        UpdateAgentStatusLine();
     }
 
     private void UpdateAgentStatusLine()
     {
+        if (!_agent.IsResolved)
+        {
+            AgentStatus.Text = "检测 agent…";
+            return;
+        }
         var path = _agent.ResolveAgentPath();
         var kind = _agent.RuntimeKind;
         if (path == null)
@@ -1905,7 +2425,7 @@ public partial class MainWindow : Window
         await EnsureAgentTimelineAsync();
         PostAgentUi(new { op = "clear" });
         _agent.Refresh();
-        EnsureAgentWelcome();
+        await EnsureAgentWelcomeAsync();
         AgentInput.Focus();
     }
 
@@ -1960,9 +2480,9 @@ public partial class MainWindow : Window
                     prompt,
                     continueSession,
                     AgentChatMode.Agent,
-                    delta => Dispatcher.Invoke(() => AppendAgentDelta(delta)),
+                    delta => Dispatcher.BeginInvoke(() => AppendAgentDelta(delta)),
                     onLog: null,
-                    onTool: info => Dispatcher.Invoke(() => ApplyAgentToolCall(info)),
+                    onTool: info => Dispatcher.BeginInvoke(() => ApplyAgentToolCall(info)),
                     _agentCts.Token));
 
             SealAgentStreamBubble(fallbackIfEmpty: final);
@@ -2373,8 +2893,16 @@ public partial class MainWindow : Window
             VerticalContentAlignment = VerticalAlignment.Center,
             Tag = todo.Id,
         };
+        var cancelled = false;
+        void EndInline()
+        {
+            _inlineEscCancel = null;
+            _inputFocused = false;
+        }
         void Commit()
         {
+            if (cancelled || !titleHost.Children.Contains(box)) return;
+            EndInline();
             var newTitle = (box.Text ?? "").Trim();
             if (newTitle.Length == 0)
             {
@@ -2396,9 +2924,13 @@ public partial class MainWindow : Window
         }
         void Cancel()
         {
+            if (!titleHost.Children.Contains(box)) return;
+            cancelled = true;
+            EndInline();
             titleHost.Children.Clear();
             titleHost.Children.Add(titleBlock);
         }
+        _inlineEscCancel = Cancel;
         box.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
@@ -2414,8 +2946,8 @@ public partial class MainWindow : Window
         };
         box.LostKeyboardFocus += (_, _) =>
         {
-            // 失焦也保存（若仍挂在树上）
-            if (titleHost.Children.Contains(box))
+            // 失焦保存；Esc 取消时 cancelled=true，跳过
+            if (!cancelled && titleHost.Children.Contains(box))
                 Commit();
         };
         titleHost.Children.Add(box);
