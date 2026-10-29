@@ -385,8 +385,8 @@ public partial class MainWindow : Window
             : MaterialDesignThemes.Wpf.PackIconKind.PinOutline;
         PinIcon.Foreground = _pinned ? accent : muted;
         BtnPin.ToolTip = _pinned
-            ? "已钉住：不自动收起（Esc 取消并隐藏）"
-            : "钉子：固定展开、不自动收起";
+            ? "已钉住：不自动收起（F1 取消钉住，Esc 取消并隐藏）"
+            : "钉子：固定展开、不自动收起（F1）";
     }
 
     private void EdgeTimer_Tick(object? sender, EventArgs e)
@@ -495,6 +495,14 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // F1 → 钉住 / 取消钉住
+        if (e.Key == Key.F1)
+        {
+            BtnPin_Click(sender, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
+
         // Alt+1/2/3/4 → 主题笔记 / 待办 / 邮件 / 大模型
         if ((Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt
             && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == ModifierKeys.None)

@@ -164,7 +164,7 @@
         </StackPanel>
         <Button x:Name="BtnPin" DockPanel.Dock="Right" Click="BtnPin_Click"
                 Padding="6,4" Margin="4,0,0,0" VerticalAlignment="Center"
-                ToolTip="钉子：固定展开、不自动收起">
+                ToolTip="钉子：固定展开、不自动收起（F1）">
           <materialDesign:PackIcon x:Name="PinIcon" Kind="PinOutline" Width="18" Height="18"
                                    Foreground="{StaticResource Muted}"
                                    VerticalAlignment="Center"/>
