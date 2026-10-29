@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>大模型 · 网页时间线样稿</title>
+  <style>
+    :root {
+      --accent: #0078d4;
+      --accent-soft: rgba(0, 120, 212, 0.12);
+      --fg: #1a1a1a;
+      --muted: #6b6b6b;
+      --line: rgba(0, 0, 0, 0.08);
+      --bg: #f3f3f3;
+      --panel: #ffffff;
+      --ok: #0f7b3a;
+      --run: #0078d4;
+      --fail: #c42b1c;
+      --mono: Consolas, "Cascadia Mono", "Microsoft YaHei UI", monospace;
+      --sans: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(1200px 600px at 20% 0%, #dbeafe 0%, transparent 55%),
+        linear-gradient(160deg, #e8eef5, #f5f5f5 40%, #ebe7e1);
+      font-family: var(--sans);
+      color: var(--fg);
+    }
+    .stage {
+      width: min(380px, 94vw);
+      height: min(720px, 92vh);
+      background: var(--bg);
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(20, 40, 70, 0.18);
+      border: 1px solid rgba(0,0,0,0.06);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .caption {
+      position: fixed;
+      left: 24px;
+      bottom: 20px;
+      max-width: 280px;
+      font-size: 12.5px;
+      color: #445;
+      background: rgba(255,255,255,0.85);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      line-height: 1.45;
+    }
+    .head {
+      padding: 14px 14px 0;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    .tabs {
+      display: flex;
+      gap: 14px;
+      font-size: 13px;
+      color: var(--muted);
+      padding-bottom: 8px;
+    }
+    .tabs .on {
+      color: var(--fg);
+      font-weight: 600;
+      border-bottom: 2px solid var(--accent);
+      padding-bottom: 6px;
+    }
+    .agent-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      font-size: 11.5px;
+      color: var(--muted);
+      background: var(--bg);
+    }
+    .ghost {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: default;
+      padding: 4px 8px;
+      border-radius: 6px;
+    }
+    .timeline {
+      flex: 1;
+      overflow: auto;
+      padding: 12px 14px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .sys {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .bubble-user {
+      align-self: flex-end;
+      max-width: 86%;
+      background: var(--accent);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .bubble-ai {
+      align-self: flex-start;
+      max-width: 92%;
+      background: var(--accent-soft);
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .bubble-ai p { margin: 0 0 8px; }
+    .bubble-ai p:last-child { margin-bottom: 0; }
+    .tool {
+      position: relative;
+      margin-left: 2px;
+      padding: 9px 11px 9px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      font-size: 12px;
+    }
+    .tool::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 10px;
+      bottom: 10px;
+      width: 3px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+    .tool.running::before { background: var(--run); }
+    .tool.done::before { background: #8a8a8a; }
+    .tool.fail::before { background: var(--fail); }
+    .tool-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .tool-kind {
+      font-weight: 600;
+      font-size: 12.5px;
+    }
+    .tool-state {
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .tool.running .tool-state { color: var(--run); }
+    .tool.fail .tool-state { color: var(--fail); }
+    .tool-detail {
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      word-break: break-all;
+    }
+    .tool-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .rail {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-left: 6px;
+      border-left: 1px dashed rgba(0,0,0,0.12);
+      margin: 2px 0 2px 8px;
+      padding-left: 12px;
+    }
+    .composer {
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px 14px;
+      background: var(--bg);
+      border-top: 1px solid var(--line);
+    }
+    .composer input {
+      flex: 1;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 13px;
+      outline: none;
+      background: #fff;
+    }
+    .composer button {
+      border: 0;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 8px;
+      padding: 0 16px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    th, td {
+      border: 1px solid rgba(0,0,0,0.12);
+      padding: 4px 6px;
+      text-align: left;
+    }
+    th { background: var(--accent-soft); }
+    .badge {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="stage" aria-label="侧栏样稿">
+    <div class="head">
+      <div class="title"><span class="badge"></span>方老师的桌面工作台</div>
+      <div class="tabs">
+        <span>主题笔记</span>
+        <span>待办事项</span>
+        <span>收发邮件</span>
+        <span class="on">大模型</span>
+      </div>
+    </div>
+    <div class="agent-bar">
+      <span>WSL · Agent · 时间线样稿</span>
+      <button class="ghost" type="button">新任务</button>
+    </div>
+    <div class="timeline">
+      <div class="sys">Agent 模式（可改文件、跑命令）
+工作区：C:\Users\fangzy\Desktop\智能体空间
+Enter 发送，Shift+Enter 换行。</div>
+
+      <div class="bubble-user">归档报账：桌面的冯硕耗材</div>
+
+      <div class="bubble-ai">
+        <p>先确认文件夹创建日期，再按规则改名并移到报账目录。</p>
+      </div>
+
+      <div class="rail">
+        <div class="tool done">
+          <div class="tool-top">
+            <span class="tool-kind">列出目录</span>
+            <span class="tool-state">完成</span>
+          </div>
+          <div class="tool-detail">Desktop</div>
+          <div class="tool-meta">匹配 1 项</div>
+        </div>
+
+        <div class="tool done">
+          <div class="tool-top">
+            <span class="tool-kind">读取</span>
+            <span class="tool-state">完成</span>
+          </div>
+          <div class="tool-detail">archive-folders/SKILL.md</div>
+          <div class="tool-meta">48 行</div>
+        </div>
+
+        <div class="tool done">
+          <div class="tool-top">
+            <span class="tool-kind">Shell</span>
+            <span class="tool-state">完成</span>
+          </div>
+          <div class="tool-detail">powershell Get-Item ...\冯硕耗材</div>
+          <div class="tool-meta">exit 0</div>
+        </div>
+
+        <div class="tool running">
+          <div class="tool-top">
+            <span class="tool-kind">Shell</span>
+            <span class="tool-state">进行中…</span>
+          </div>
+          <div class="tool-detail">Move-Item → 07-报账\20261015-冯硕耗材</div>
+        </div>
+      </div>
+
+      <div class="bubble-ai">
+        <p>创建日期按 <code>2026-10-15</code> 加了前缀，已移入报账目录。</p>
+        <table>
+          <thead>
+            <tr><th>项</th><th>结果</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>原名</td><td>冯硕耗材</td></tr>
+            <tr><td>新名</td><td>20261015-冯硕耗材</td></tr>
+            <tr><td>目标</td><td>…\07-报账\</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="composer">
+      <input value="继续：核对该目录里有没有发票 PDF" readonly />
+      <button type="button">发送</button>
+    </div>
+  </div>
+
+  <div class="caption">
+    这是<strong>静态样稿</strong>，不是接到真实 agent 的页面。<br/>
+    和现在 WPF 气泡比：工具步骤收进左侧竖线时间线，对话气泡夹在步骤之间，更接近 Cursor Agent 的阅读方式。
+  </div>
+</body>
+</html>

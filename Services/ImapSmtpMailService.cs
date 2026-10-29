@@ -37,6 +37,8 @@ public sealed class MailMessageDetail
     public string FromAddress { get; init; } = "";
     public string To { get; init; } = "";
     public string BodyText { get; init; } = "";
+    /// <summary>原始 HTML（已把 cid 图转成 data URI），供 WebView 渲染；无 HTML 时为空。</summary>
+    public string BodyHtml { get; init; } = "";
     public DateTimeOffset? Received { get; init; }
     public IReadOnlyList<MailAttachmentInfo> Attachments { get; init; } = Array.Empty<MailAttachmentInfo>();
 }
@@ -111,10 +113,13 @@ public sealed class ImapSmtpMailService
         catch { /* 部分服务器标记已读会失败，忽略 */ }
 
         var fromMb = msg.From.Mailboxes.FirstOrDefault();
-        // 纯文本优先；美团发票等信只有 HTML，需剥离标签并压空白
+        var htmlRaw = msg.HtmlBody ?? "";
+        var bodyHtml = string.IsNullOrWhiteSpace(htmlRaw) ? "" : InlineCidImages(msg, htmlRaw);
+
+        // 纯文本用于回复引用；无纯文本时从 HTML 抽一层
         var body = CleanBodyText(msg.TextBody);
         if (string.IsNullOrWhiteSpace(body))
-            body = StripHtml(msg.HtmlBody ?? "");
+            body = StripHtml(htmlRaw);
 
         var attachments = ListAttachments(msg);
         var detail = new MailMessageDetail
@@ -126,6 +131,7 @@ public sealed class ImapSmtpMailService
             FromAddress = fromMb?.Address ?? "",
             To = string.Join(", ", msg.To.Mailboxes.Select(FormatMailbox)),
             BodyText = body?.Trim() ?? "",
+            BodyHtml = bodyHtml,
             Received = msg.Date,
             Attachments = attachments,
         };
@@ -154,6 +160,81 @@ public sealed class ImapSmtpMailService
         }
 
         await client.DisconnectAsync(true, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 标记为垃圾邮件：优先移到 Junk/垃圾邮件 文件夹；找不到则标删除并 Expunge。
+    /// 比「拒收发件人」更稳——拒收要改服务器过滤规则，川大 IMAP 一般不开放。
+    /// </summary>
+    public async Task MarkAsJunkAsync(UniqueId uid, CancellationToken ct = default)
+    {
+        EnsureConfigured();
+        using var client = await ConnectImapAsync(ct).ConfigureAwait(false);
+        var inbox = client.Inbox;
+        await inbox.OpenAsync(FolderAccess.ReadWrite, ct).ConfigureAwait(false);
+
+        var junk = await ResolveJunkFolderAsync(client, ct).ConfigureAwait(false);
+        if (junk != null)
+        {
+            await inbox.MoveToAsync(uid, junk, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await inbox.AddFlagsAsync(uid, MessageFlags.Deleted, true, ct).ConfigureAwait(false);
+            await inbox.ExpungeAsync(ct).ConfigureAwait(false);
+        }
+
+        await client.DisconnectAsync(true, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<IMailFolder?> ResolveJunkFolderAsync(ImapClient client, CancellationToken ct)
+    {
+        try
+        {
+            var special = client.GetFolder(SpecialFolder.Junk);
+            if (special != null) return special;
+        }
+        catch
+        {
+            /* 服务器未声明 SPECIAL-USE \Junk */
+        }
+
+        // 常见中英文垃圾箱名（川大 Coremail 等多用「垃圾邮件」）
+        string[] names =
+        [
+            "垃圾邮件", "垃圾箱", "Junk", "Spam", "Junk E-mail", "Bulk Mail", "Junk Email",
+        ];
+
+        try
+        {
+            var personal = client.GetFolder(client.PersonalNamespaces[0]);
+            foreach (var name in names)
+            {
+                try
+                {
+                    var f = await personal.GetSubfolderAsync(name, ct).ConfigureAwait(false);
+                    if (f != null) return f;
+                }
+                catch
+                {
+                    /* 没有该子文件夹 */
+                }
+            }
+
+            // 再扫一层子文件夹名（大小写不敏感）
+            foreach (var sub in await personal.GetSubfoldersAsync(false, ct).ConfigureAwait(false))
+            {
+                var n = sub.Name ?? "";
+                if (names.Any(x => n.Equals(x, StringComparison.OrdinalIgnoreCase)))
+                    return sub;
+            }
+        }
+        catch
+        {
+            /* 命名空间枚举失败则走删除兜底 */
+        }
+
+        return null;
     }
 
     private static IReadOnlyList<MailAttachmentInfo> ListAttachments(MimeMessage msg)
@@ -304,6 +385,60 @@ public sealed class ImapSmtpMailService
         if (mb == null) return "";
         if (!string.IsNullOrWhiteSpace(mb.Name)) return mb.Name.Trim();
         return mb.Address ?? "";
+    }
+
+    /// <summary>把 cid: 内嵌图写成 data URI，WebView2 才能显示 Logo 等。</summary>
+    private static string InlineCidImages(MimeMessage msg, string html)
+    {
+        const int maxBytes = 2 * 1024 * 1024;
+        foreach (var part in msg.BodyParts.OfType<MimePart>())
+        {
+            var rawId = part.ContentId;
+            if (string.IsNullOrWhiteSpace(rawId) || part.Content == null) continue;
+            var id = rawId.Trim().Trim('<', '>').Trim();
+            if (id.Length == 0) continue;
+
+            try
+            {
+                using var ms = new MemoryStream();
+                part.Content.DecodeTo(ms);
+                if (ms.Length == 0 || ms.Length > maxBytes) continue;
+                var mime = string.IsNullOrWhiteSpace(part.ContentType?.MimeType)
+                    ? "application/octet-stream"
+                    : part.ContentType.MimeType;
+                if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                    && !mime.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (mime.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+                    mime = GuessImageMime(part.FileName) ?? mime;
+
+                var dataUri = $"data:{mime};base64,{Convert.ToBase64String(ms.ToArray())}";
+                html = Regex.Replace(
+                    html,
+                    Regex.Escape("cid:" + id),
+                    dataUri,
+                    RegexOptions.IgnoreCase);
+            }
+            catch
+            {
+                /* 单张图失败不影响整封 */
+            }
+        }
+        return html;
+    }
+
+    private static string? GuessImageMime(string? fileName)
+    {
+        var ext = Path.GetExtension(fileName ?? "").ToLowerInvariant();
+        return ext switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".svg" => "image/svg+xml",
+            _ => null,
+        };
     }
 
     private static string CleanBodyText(string? text)

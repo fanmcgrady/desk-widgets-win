@@ -28,6 +28,9 @@ autostart.pref
 desk.db
 **/desk.db
 
+## Screenshots（勿提交含个人信息的截图）
+docs/screenshots/
+
 ## OS
 Thumbs.db
 Desktop.ini

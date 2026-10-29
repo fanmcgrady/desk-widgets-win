@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="桌面侧栏"
         WindowStyle="None"
         ResizeMode="NoResize"
@@ -161,6 +162,13 @@
           <TextBlock Text="方老师的桌面工作台" FontSize="15" FontWeight="SemiBold"
                      Foreground="{StaticResource Fg}" VerticalAlignment="Center"/>
         </StackPanel>
+        <Button x:Name="BtnPin" DockPanel.Dock="Right" Click="BtnPin_Click"
+                Padding="6,4" Margin="4,0,0,0" VerticalAlignment="Center"
+                ToolTip="钉子：固定展开、不自动收起">
+          <materialDesign:PackIcon x:Name="PinIcon" Kind="PinOutline" Width="18" Height="18"
+                                   Foreground="{StaticResource Muted}"
+                                   VerticalAlignment="Center"/>
+        </Button>
         <Button x:Name="BtnSync" DockPanel.Dock="Right" Click="BtnSync_Click"
                 Padding="6,4" VerticalAlignment="Center" ToolTip="同步">
           <StackPanel Orientation="Horizontal">
@@ -176,18 +184,18 @@
       <!-- Tabs -->
       <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
         <Border x:Name="TabNoteBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Margin="0,0,16,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabNote_Click" Padding="0,0,0,6">
+                Margin="0,0,12,0" Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabNote_Click" Padding="0,0,0,6" ToolTip="Alt+1">
           <TextBlock x:Name="TabNoteText" Text="主题笔记" FontSize="13"/>
         </Border>
         <Border x:Name="TabTodoBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Margin="0,0,16,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabTodo_Click" Padding="0,0,0,6">
-          <TextBlock x:Name="TabTodoText" Text="代办事项" FontSize="13" Foreground="{StaticResource Muted}"/>
+                Margin="0,0,12,0" Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabTodo_Click" Padding="0,0,0,6" ToolTip="Alt+2">
+          <TextBlock x:Name="TabTodoText" Text="待办事项" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
         <Border x:Name="TabMailBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabMail_Click" Padding="0,0,0,6">
+                Margin="0,0,12,0" Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabMail_Click" Padding="0,0,0,6" ToolTip="Alt+3">
           <StackPanel Orientation="Horizontal">
             <TextBlock x:Name="TabMailText" Text="收发邮件" FontSize="13" Foreground="{StaticResource Muted}"/>
             <Border x:Name="MailTabBadge" Visibility="Collapsed" CornerRadius="8" Height="16"
@@ -197,6 +205,11 @@
                          FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
           </StackPanel>
+        </Border>
+        <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="Alt+4">
+          <TextBlock x:Name="TabAgentText" Text="大模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
 
@@ -231,7 +244,7 @@
       </Border>
 
       <Grid>
-        <!-- 代办 -->
+        <!-- 待办 -->
         <DockPanel x:Name="TodoPanel" Visibility="Collapsed">
           <Border DockPanel.Dock="Bottom" Background="White" CornerRadius="8" Padding="8"
                   BorderBrush="#10000000" BorderThickness="1" Margin="0,8,0,0">
@@ -291,7 +304,7 @@
           <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" Height="24">
             <Button Content="+ 新建" Foreground="{StaticResource Accent}" FontSize="12"
                     Click="BtnNewNote_Click"/>
-            <Button x:Name="BtnAddTodoFromNote" Content="加入代办"
+            <Button x:Name="BtnAddTodoFromNote" Content="加入待办"
                     HorizontalAlignment="Right"
                     Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
                     Click="BtnAddTodoFromNote_Click"/>
@@ -311,7 +324,7 @@
                      AcceptsReturn="True" TextWrapping="Wrap"
                      VerticalScrollBarVisibility="Auto"
                      BorderThickness="0" Background="Transparent"
-                     FontSize="13" Padding="0"
+                     FontSize="15.5" Padding="0"
                      GotKeyboardFocus="Input_GotFocus"
                      LostKeyboardFocus="Input_LostFocus"
                      TextChanged="NoteEdit_TextChanged"/>
@@ -371,25 +384,36 @@
               <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="False">
                 <Button Content="← 返回" Style="{StaticResource MailGhostBtn}"
                         Click="BtnMailBack_Click" HorizontalAlignment="Left"/>
-                <Button DockPanel.Dock="Right" Content="回复" Style="{StaticResource MailActionBtn}"
-                        Click="BtnMailReply_Click"/>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                  <Button Content="垃圾" Style="{StaticResource MailGhostBtn}"
+                          ToolTip="标记为垃圾邮件并从列表移除（Ctrl+D）"
+                          Click="BtnMailJunk_Click" Margin="0,0,6,0"/>
+                  <Button Content="回复" Style="{StaticResource MailActionBtn}"
+                          Click="BtnMailReply_Click"/>
+                </StackPanel>
               </DockPanel>
               <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
-                      Padding="16,14">
-                <!-- Disabled 横向：否则子级按无限宽测量，正文不换行、附件星列变 0，右侧被裁切 -->
-                <ScrollViewer VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Disabled">
-                  <StackPanel>
+                      Padding="16,14" ClipToBounds="True">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Top">
                     <TextBlock x:Name="MailReadSubject" FontSize="16" FontWeight="SemiBold"
                                TextWrapping="Wrap" VerticalAlignment="Top" Margin="0,0,0,8"/>
                     <TextBlock x:Name="MailReadMeta" FontSize="12"
                                Foreground="{StaticResource Muted}" TextWrapping="Wrap"
                                VerticalAlignment="Top" Margin="0,0,0,10"/>
-                    <StackPanel x:Name="MailReadAttachments" Margin="0,0,0,12"/>
-                    <TextBlock x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
-                               VerticalAlignment="Top" TextOptions.TextFormattingMode="Display"/>
+                    <StackPanel x:Name="MailReadAttachments" Margin="0,0,0,8"/>
                   </StackPanel>
-                </ScrollViewer>
+                  <!-- HTML / 纯文本二选一叠放，避免 DockPanel 只给最后一个子级铺满 -->
+                  <Grid>
+                    <wv2:WebView2 x:Name="MailReadHtml" Visibility="Collapsed"
+                                  DefaultBackgroundColor="#FFFFFF"/>
+                    <ScrollViewer x:Name="MailReadPlainHost" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <TextBlock x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
+                                 VerticalAlignment="Top" TextOptions.TextFormattingMode="Display"/>
+                    </ScrollViewer>
+                  </Grid>
+                </DockPanel>
               </Border>
             </DockPanel>
 
@@ -521,6 +545,43 @@
             </Border>
           </Grid>
         </DockPanel>
+
+        <!-- 大模型：固定 Agent 模式 -->
+        <DockPanel x:Name="AgentPanel" Visibility="Collapsed">
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" LastChildFill="False" MinHeight="28">
+            <TextBlock x:Name="AgentStatus" Text="Agent"
+                       Foreground="{StaticResource Muted}" FontSize="11.5"
+                       VerticalAlignment="Center" TextWrapping="NoWrap"
+                       TextTrimming="CharacterEllipsis"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Content="新任务" Style="{StaticResource MailGhostBtn}"
+                      Click="BtnAgentNew_Click" Margin="0,0,4,0"/>
+              <Button x:Name="BtnAgentStop" Content="停止" Style="{StaticResource MailGhostBtn}"
+                      Click="BtnAgentStop_Click" Visibility="Collapsed"/>
+            </StackPanel>
+          </DockPanel>
+          <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+            <Button DockPanel.Dock="Right" Content="发送" Style="{StaticResource PrimaryBtn}"
+                    Width="72" Height="34" Margin="8,0,0,0" Click="BtnAgentSend_Click"/>
+            <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
+                    Padding="10,6" MinHeight="34">
+              <TextBox x:Name="AgentInput"
+                       Style="{StaticResource PlainInput}"
+                       AcceptsReturn="False" TextWrapping="Wrap"
+                       FontSize="13" MinHeight="22" MaxHeight="88"
+                       VerticalScrollBarVisibility="Auto"
+                       GotKeyboardFocus="Input_GotFocus"
+                       LostKeyboardFocus="Input_LostFocus"
+                       PreviewKeyDown="AgentInput_PreviewKeyDown"/>
+            </Border>
+          </DockPanel>
+          <Border Background="White" CornerRadius="8"
+                  BorderBrush="#10000000" BorderThickness="1" ClipToBounds="True">
+            <wv2:WebView2 x:Name="AgentTimeline"
+                          DefaultBackgroundColor="#FFF3F3F3"/>
+          </Border>
+        </DockPanel>
+
       </Grid>
     </DockPanel>
   </Border>

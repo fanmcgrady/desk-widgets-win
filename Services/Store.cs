@@ -101,7 +101,7 @@ public sealed class Store
         alter.ExecuteNonQuery();
     }
 
-    /// <summary>旧主题笔记并入当天代办（备注=正文），只迁移一次。</summary>
+    /// <summary>旧主题笔记并入当天待办（备注=正文），只迁移一次。</summary>
     private void MigrateNotesToTodos(SqliteConnection con)
     {
         if (GetMeta(con, "notes_migrated") == "1") return;

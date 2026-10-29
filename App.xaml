@@ -6,18 +6,19 @@
   <Application.Resources>
     <ResourceDictionary>
       <ResourceDictionary.MergedDictionaries>
-        <materialDesign:BundledTheme BaseTheme="Light" PrimaryColor="DeepPurple" SecondaryColor="Teal"/>
+        <materialDesign:BundledTheme BaseTheme="Light" PrimaryColor="Blue" SecondaryColor="Teal"/>
         <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesign3.Defaults.xaml"/>
       </ResourceDictionary.MergedDictionaries>
 
       <SolidColorBrush x:Key="Bg" Color="#FFFFFFFF"/>
       <SolidColorBrush x:Key="Panel" Color="#FFFFFFFF"/>
       <SolidColorBrush x:Key="Fg" Color="#FF1C1B1F"/>
-      <SolidColorBrush x:Key="Muted" Color="#FF79747E"/>
-      <SolidColorBrush x:Key="Accent" Color="#FF6750A4"/>
-      <SolidColorBrush x:Key="AccentSoft" Color="#FFE8DEF8"/>
+      <SolidColorBrush x:Key="Muted" Color="#FF605E5C"/>
+      <!-- 微软 Fluent 蓝 #0078D4 -->
+      <SolidColorBrush x:Key="Accent" Color="#FF0078D4"/>
+      <SolidColorBrush x:Key="AccentSoft" Color="#FFDEECF9"/>
       <SolidColorBrush x:Key="Line" Color="#1F000000"/>
-      <SolidColorBrush x:Key="Hover" Color="#146750A4"/>
+      <SolidColorBrush x:Key="Hover" Color="#140078D4"/>
     </ResourceDictionary>
   </Application.Resources>
 </Application>

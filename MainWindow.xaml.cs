@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -8,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using DeskWidgets.Services;
+using Markdig;
 using DrawingColor = System.Drawing.Color;
 using DrawingIcon = System.Drawing.Icon;
 using DrawingPoint = System.Drawing.Point;
@@ -25,20 +27,35 @@ namespace DeskWidgets;
 public partial class MainWindow : Window
 {
     private const double PanelWidthDip = 320;
-    /// <summary>阅读/写信时临时加宽，减轻侧栏窄屏读长文的问题。</summary>
+    /// <summary>邮件阅读/写信加宽，便于看 HTML 正文。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 8;
+    /// <summary>右缘顶部死区（约等于最大化窗口关闭按钮高度），避免关窗时误触展开。</summary>
+    private const int TopEdgeDeadZoneDip = 56;
 
-    private enum TabMode { Note, Todo, Mail }
+    private enum TabMode { Note, Todo, Mail, Agent }
 
     private readonly Store _store = new();
     private readonly NoteFiles _notes = new();
     private readonly MsToDoSync _sync;
     private readonly ImapSmtpMailService _mail = new();
+    private readonly CursorAgentClient _agent = new();
+    private static readonly MarkdownPipeline AgentMdPipeline = new MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .Build();
+    private bool _agentHasSession;
+    private bool _agentBusy;
+    private bool _agentTimelineReady;
+    private bool _agentWelcomeShown;
+    private bool _agentStreaming;
+    private string _agentStreamText = "";
+    private CancellationTokenSource? _agentCts;
     private enum MailView { List, Read, Compose, Settings }
     private MailView _mailView = MailView.List;
     private MailMessageDetail? _mailCurrent;
     private bool _mailBusy;
+    private bool _mailHtmlReady;
+    private bool _mailHtmlHooksBound;
     private int _mailUnread;
     private List<MailMessageSummary> _mailCache = new();
     private DateTime _mailCacheAtUtc = DateTime.MinValue;
@@ -59,6 +76,8 @@ public partial class MainWindow : Window
     private int _lastPlaceH = int.MinValue;
 
     private bool _expanded;
+    /// <summary>钉子固定：置顶且不因鼠标离开自动收起。</summary>
+    private bool _pinned;
     private bool _allowClose;
     private DateTime? _leaveSince;
     /// <summary>托盘打开后：鼠标尚未进入侧栏前不自动收起，避免一点开就被 EdgeTimer 关掉。</summary>
@@ -73,7 +92,7 @@ public partial class MainWindow : Window
     private bool _syncing;
 
     private string? _activeNoteId;
-    private string? _editingTodoId; // 从代办「编辑」进入时，笔记区改的是这条代办
+    private string? _editingTodoId; // 从待办「编辑」进入时，笔记区改的是这条待办
     private bool _noteLoading;
     private bool _noteWriting;
     private DispatcherTimer? _noteSaveTimer;
@@ -116,6 +135,7 @@ public partial class MainWindow : Window
         Autostart.ApplyPreferred(); // 默认开机自启；托盘可关，并记住选择
         SetupTray();
         StyleTabs();
+        UpdatePinButton();
         PaintShowDoneBox();
         RebuildCalendar();
         UpdateDueHint();
@@ -230,7 +250,10 @@ public partial class MainWindow : Window
         {
             var scale = DpiScale(s);
             var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
+            var topDead = Math.Max(40, (int)Math.Ceiling(TopEdgeDeadZoneDip * scale));
             var wa = s.WorkingArea;
+            // 右上角留给最大化窗口的关闭按钮，不触发侧栏
+            if (mouse.Y < wa.Top + topDead) continue;
             if (mouse.X >= wa.Right - hit && mouse.X <= wa.Right + 2
                 && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom)
                 return s;
@@ -245,16 +268,10 @@ public partial class MainWindow : Window
             helper.EnsureHandle();
     }
 
-    /// <summary>当前侧栏目标宽度：邮件阅读/写信用宽版，其余用窄版。</summary>
-    private double ActivePanelWidthDip
-    {
-        get
-        {
-            if (_tab == TabMode.Mail && _mailView is MailView.Read or MailView.Compose)
-                return PanelWidthMailDip;
-            return PanelWidthDip;
-        }
-    }
+    private double ActivePanelWidthDip =>
+        _tab == TabMode.Mail && _mailView is MailView.Read or MailView.Compose
+            ? PanelWidthMailDip
+            : PanelWidthDip;
 
     private void PlaceOnScreen(WinForms.Screen screen, bool expanded)
     {
@@ -331,9 +348,45 @@ public partial class MainWindow : Window
     {
         FlushNoteSave();
         _expanded = false;
+        _pinned = false;
+        UpdatePinButton();
         _leaveSince = null;
         _awaitPanelEnter = false;
         PlaceCollapsed();
+    }
+
+    private void BtnPin_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pinned)
+        {
+            _pinned = false;
+            UpdatePinButton();
+            return;
+        }
+
+        _pinned = true;
+        _leaveSince = null;
+        _awaitPanelEnter = false;
+        if (!_expanded) Expand();
+        else
+        {
+            Topmost = true;
+            Activate();
+        }
+        UpdatePinButton();
+    }
+
+    private void UpdatePinButton()
+    {
+        var accent = (MediaBrush)FindResource("Accent");
+        var muted = (MediaBrush)FindResource("Muted");
+        PinIcon.Kind = _pinned
+            ? MaterialDesignThemes.Wpf.PackIconKind.Pin
+            : MaterialDesignThemes.Wpf.PackIconKind.PinOutline;
+        PinIcon.Foreground = _pinned ? accent : muted;
+        BtnPin.ToolTip = _pinned
+            ? "已钉住：不自动收起（Esc 取消并隐藏）"
+            : "钉子：固定展开、不自动收起";
     }
 
     private void EdgeTimer_Tick(object? sender, EventArgs e)
@@ -367,10 +420,12 @@ public partial class MainWindow : Window
         if (dipW > maxDip) dipW = Math.Max(PanelWidthDip, maxDip);
         var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
         var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
+        var topDead = Math.Max(40, (int)Math.Ceiling(TopEdgeDeadZoneDip * scale));
         var wa = screen.WorkingArea;
 
+        // 右上死区不计入「贴边」，避免关窗时把侧栏当成还在贴边而一直展开
         bool nearEdge = mouse.X >= wa.Right - hit && mouse.X <= wa.Right + 2
-                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
+                        && mouse.Y >= wa.Top + topDead && mouse.Y <= wa.Bottom;
         bool inPanel = mouse.X >= wa.Right - widthPx && mouse.X <= wa.Right
                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
 
@@ -381,6 +436,12 @@ public partial class MainWindow : Window
         {
             _dockScreen = edgeScreen;
             PlaceExpanded();
+            _leaveSince = null;
+            return;
+        }
+
+        if (_pinned)
+        {
             _leaveSince = null;
             return;
         }
@@ -434,6 +495,38 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // Alt+1/2/3/4 → 主题笔记 / 待办 / 邮件 / 大模型
+        if ((Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt
+            && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == ModifierKeys.None)
+        {
+            var tabKey = e.Key == Key.System ? e.SystemKey : e.Key;
+            var handled = tabKey switch
+            {
+                Key.D1 or Key.NumPad1 => InvokeTabClick(TabNote_Click),
+                Key.D2 or Key.NumPad2 => InvokeTabClick(TabTodo_Click),
+                Key.D3 or Key.NumPad3 => InvokeTabClick(TabMail_Click),
+                Key.D4 or Key.NumPad4 => InvokeTabClick(TabAgent_Click),
+                _ => false,
+            };
+            if (handled)
+            {
+                e.Handled = true;
+                return;
+            }
+        }
+
+        // 邮件阅读：Ctrl+D → 标记垃圾并移出列表
+        if (!_inputFocused
+            && _tab == TabMode.Mail
+            && _mailView == MailView.Read
+            && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && e.Key == Key.D)
+        {
+            BtnMailJunk_Click(sender, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
+
         // 邮件阅读：Backspace / 浏览器后退键 → 返回列表
         if (!_inputFocused
             && _tab == TabMode.Mail
@@ -447,6 +540,13 @@ public partial class MainWindow : Window
 
         if (e.Key != Key.Escape) return;
         if (_inputFocused) return;
+        // 钉子：Esc 取消固定并隐藏
+        if (_pinned)
+        {
+            Collapse();
+            e.Handled = true;
+            return;
+        }
         // 阅读中优先返回列表，而不是直接收起侧栏
         if (_tab == TabMode.Mail && _mailView == MailView.Read)
         {
@@ -525,7 +625,7 @@ public partial class MainWindow : Window
         _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ExpandFromTray);
     }
 
-    /// <summary>与主界面一致的紫色日历托盘图标（Accent #6750A4 / Soft #E8DEF8）。</summary>
+    /// <summary>与主界面一致的微软蓝日历托盘图标（Accent #0078D4 / Soft #DEECF9）。</summary>
     private static DrawingIcon CreateTrayIcon()
     {
         var bmp = new System.Drawing.Bitmap(32, 32);
@@ -535,8 +635,8 @@ public partial class MainWindow : Window
             g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             g.Clear(DrawingColor.Transparent);
 
-            var soft = DrawingColor.FromArgb(232, 222, 248);   // AccentSoft
-            var accent = DrawingColor.FromArgb(103, 80, 164);  // Accent
+            var soft = DrawingColor.FromArgb(222, 236, 249);   // AccentSoft
+            var accent = DrawingColor.FromArgb(0, 120, 212);   // Accent
             var white = DrawingColor.White;
 
             using (var softBrush = new System.Drawing.SolidBrush(soft))
@@ -547,7 +647,7 @@ public partial class MainWindow : Window
                 FillRoundRect(g, accentBrush, 7, 9, 18, 17, 4);
 
             // 顶部装订条
-            using (var bar = new System.Drawing.SolidBrush(DrawingColor.FromArgb(232, 222, 248)))
+            using (var bar = new System.Drawing.SolidBrush(DrawingColor.FromArgb(222, 236, 249)))
                 g.FillRectangle(bar, 7, 9, 18, 5);
 
             // 装订环
@@ -613,14 +713,14 @@ public partial class MainWindow : Window
 
     private sealed class TrayColorTable : WinForms.ProfessionalColorTable
     {
-        private static readonly DrawingColor Soft = DrawingColor.FromArgb(232, 222, 248);
-        private static readonly DrawingColor SoftHover = DrawingColor.FromArgb(220, 210, 240);
+        private static readonly DrawingColor Soft = DrawingColor.FromArgb(222, 236, 249);
+        private static readonly DrawingColor SoftHover = DrawingColor.FromArgb(200, 224, 242);
         private static readonly DrawingColor Bg = DrawingColor.FromArgb(250, 250, 250);
 
         public override DrawingColor MenuItemSelected => SoftHover;
         public override DrawingColor MenuItemSelectedGradientBegin => Soft;
         public override DrawingColor MenuItemSelectedGradientEnd => SoftHover;
-        public override DrawingColor MenuItemBorder => DrawingColor.FromArgb(103, 80, 164);
+        public override DrawingColor MenuItemBorder => DrawingColor.FromArgb(0, 120, 212);
         public override DrawingColor MenuBorder => DrawingColor.FromArgb(40, 0, 0, 0);
         public override DrawingColor ToolStripDropDownBackground => Bg;
         public override DrawingColor ImageMarginGradientBegin => Bg;
@@ -802,10 +902,20 @@ public partial class MainWindow : Window
                 ? $"这天 · 今天 {_selected:MM-dd}"
                 : $"这天 · {_selected:yyyy-MM-dd}";
         }
-        else DueHint.Text = $"全部未完成 · 新代办挂到 {_selected:MM-dd}";
+        else DueHint.Text = $"全部未完成 · 新待办挂到 {_selected:MM-dd}";
     }
 
     // ----- tabs -----
+    private bool InvokeTabClick(MouseButtonEventHandler handler)
+    {
+        var args = new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+        {
+            RoutedEvent = UIElement.MouseLeftButtonUpEvent,
+        };
+        handler(this, args);
+        return true;
+    }
+
     private void TabNote_Click(object sender, MouseButtonEventArgs e)
     {
         FlushNoteSave();
@@ -855,6 +965,23 @@ public partial class MainWindow : Window
         _tab = TabMode.Mail;
         StyleTabs();
         _ = EnterMailTabAsync();
+    }
+
+    private void TabAgent_Click(object sender, MouseButtonEventArgs e)
+    {
+        FlushNoteSave();
+        RefreshNoteChipTitlesIfNeeded();
+        ExitTodoEditMode();
+        _tab = TabMode.Agent;
+        StyleTabs();
+        _ = EnterAgentTabAsync();
+    }
+
+    private async Task EnterAgentTabAsync()
+    {
+        await EnsureAgentTimelineAsync();
+        EnsureAgentWelcome();
+        AgentInput.Focus();
     }
 
     // ----- 邮件（IMAP/SMTP，默认 mail.scu.edu.cn） -----
@@ -914,12 +1041,10 @@ public partial class MainWindow : Window
         if (view == MailView.Compose)
             UpdateMailComposeHints();
 
-        // 阅读/写信加宽，列表/设置收回窄栏
         if (_expanded) PlaceExpanded();
 
-        // 宽→窄时，鼠标常还停在「原来宽出来的区域」，会被当成离开而收起。
-        // 收窄后先锁住自动隐藏，等鼠标再次进入侧栏再恢复。
-        if (wasWide && !willWide && _expanded)
+        // 宽→窄时鼠标常还在「原加宽区域」，会被当成离开；先锁自动隐藏
+        if (wasWide && !willWide && _expanded && !_pinned)
         {
             _awaitPanelEnter = true;
             _leaveSince = null;
@@ -1216,7 +1341,7 @@ public partial class MainWindow : Window
         // 未读：浅紫底；已读：透明
         MediaBrush idleBg = m.IsRead
             ? MediaBrushes.Transparent
-            : new SolidColorBrush(MediaColor.FromArgb(0x1A, 0x67, 0x50, 0xA4));
+            : new SolidColorBrush(MediaColor.FromArgb(0x1A, 0x00, 0x78, 0xD4));
 
         var row = new Border
         {
@@ -1284,9 +1409,9 @@ public partial class MainWindow : Window
             if (detail.Received != null)
                 meta += $"\n时间 {detail.Received.Value.ToLocalTime():yyyy-MM-dd HH:mm}";
             MailReadMeta.Text = meta;
-            MailReadBody.Text = string.IsNullOrWhiteSpace(detail.BodyText) ? "（无正文）" : detail.BodyText;
             RenderMailAttachments(detail);
             ShowMailView(MailView.Read);
+            await ShowMailBodyAsync(detail);
             SetMailStatus(detail.Attachments.Count > 0 ? $"附件 {detail.Attachments.Count} 个" : null);
             // 缓存里标已读，避免返回列表又整页重拉
             for (var i = 0; i < _mailCache.Count; i++)
@@ -1337,7 +1462,7 @@ public partial class MainWindow : Window
         {
             var row = new Border
             {
-                Background = new SolidColorBrush(MediaColor.FromArgb(0x14, 0x67, 0x50, 0xA4)),
+                Background = new SolidColorBrush(MediaColor.FromArgb(0x14, 0x00, 0x78, 0xD4)),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(10, 8, 10, 8),
                 Margin = new Thickness(0, 0, 0, 6),
@@ -1430,8 +1555,134 @@ public partial class MainWindow : Window
         return (bytes / (1024.0 * 1024.0)).ToString("0.##") + " MB";
     }
 
+    private async Task ShowMailBodyAsync(MailMessageDetail detail)
+    {
+        var html = detail.BodyHtml?.Trim() ?? "";
+        if (!string.IsNullOrEmpty(html))
+        {
+            try
+            {
+                await EnsureMailHtmlAsync();
+                MailReadHtml.Visibility = Visibility.Visible;
+                MailReadPlainHost.Visibility = Visibility.Collapsed;
+                MailReadHtml.NavigateToString(WrapMailHtml(html));
+                return;
+            }
+            catch (Exception ex)
+            {
+                // 未装 WebView2 Runtime 等：退回纯文本
+                SetMailStatus("HTML 预览不可用，已显示纯文本 · " + ShortErr(ex));
+            }
+        }
+
+        ClearMailHtmlView();
+        MailReadHtml.Visibility = Visibility.Collapsed;
+        MailReadPlainHost.Visibility = Visibility.Visible;
+        MailReadBody.Text = string.IsNullOrWhiteSpace(detail.BodyText) ? "（无正文）" : detail.BodyText;
+    }
+
+    private async Task EnsureMailHtmlAsync()
+    {
+        if (_mailHtmlReady && MailReadHtml.CoreWebView2 != null) return;
+        await MailReadHtml.EnsureCoreWebView2Async();
+        if (MailReadHtml.CoreWebView2 == null)
+            throw new InvalidOperationException("WebView2 初始化失败");
+
+        var settings = MailReadHtml.CoreWebView2.Settings;
+        settings.IsStatusBarEnabled = false;
+        settings.AreDefaultContextMenusEnabled = true;
+        settings.AreDevToolsEnabled = false;
+        settings.IsZoomControlEnabled = true;
+
+        if (!_mailHtmlHooksBound)
+        {
+            MailReadHtml.CoreWebView2.NavigationStarting += MailHtml_NavigationStarting;
+            MailReadHtml.CoreWebView2.NewWindowRequested += MailHtml_NewWindowRequested;
+            // 每封信加载后压掉横向滚动
+            _ = MailReadHtml.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+                """
+                document.documentElement.style.overflowX='hidden';
+                document.documentElement.style.maxWidth='100%';
+                document.documentElement.style.width='100%';
+                if(document.body){document.body.style.overflowX='hidden';document.body.style.maxWidth='100%';document.body.style.width='100%';}
+                """);
+            _mailHtmlHooksBound = true;
+        }
+        _mailHtmlReady = true;
+    }
+
+    private void MailHtml_NavigationStarting(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs e)
+    {
+        var uri = e.Uri ?? "";
+        if (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
+        {
+            e.Cancel = true;
+            OpenExternalUrl(uri);
+        }
+    }
+
+    private void MailHtml_NewWindowRequested(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        e.Handled = true;
+        OpenExternalUrl(e.Uri);
+    }
+
+    private static void OpenExternalUrl(string? uri)
+    {
+        if (string.IsNullOrWhiteSpace(uri)) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = uri, UseShellExecute = true });
+        }
+        catch { /* 系统打不开就算了 */ }
+    }
+
+    private static string WrapMailHtml(string bodyHtml)
+    {
+        // 强制铺满阅读区宽度，禁止左右滑动（覆盖邮件里写死的 600/700px）
+        var hasHtmlTag = bodyHtml.Contains("<html", StringComparison.OrdinalIgnoreCase);
+        const string headBits = """
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width,initial-scale=1"/>
+            <style>
+            html,body{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important;overflow-x:hidden!important;background:#fff;color:#1c1b1f;}
+            body{font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;font-size:14px;line-height:1.55;padding:4px 2px 16px!important;word-wrap:break-word;overflow-wrap:anywhere;box-sizing:border-box;}
+            *,*::before,*::after{box-sizing:border-box;max-width:100%!important;}
+            img,video,iframe,svg{max-width:100%!important;height:auto!important;}
+            table{width:100%!important;max-width:100%!important;table-layout:fixed!important;}
+            td,th{word-wrap:break-word!important;overflow-wrap:anywhere!important;}
+            pre,code{white-space:pre-wrap!important;word-break:break-word!important;}
+            a{color:#0078D4;}
+            </style>
+            """;
+
+        if (hasHtmlTag)
+        {
+            if (bodyHtml.Contains("</head>", StringComparison.OrdinalIgnoreCase))
+                return bodyHtml.Replace("</head>", headBits + "</head>", StringComparison.OrdinalIgnoreCase);
+            if (bodyHtml.Contains("<body", StringComparison.OrdinalIgnoreCase))
+                return bodyHtml.Replace("<body", "<head>" + headBits + "</head><body", StringComparison.OrdinalIgnoreCase);
+            return "<head>" + headBits + "</head>" + bodyHtml;
+        }
+
+        return "<!DOCTYPE html><html><head>" + headBits + "</head><body>" + bodyHtml + "</body></html>";
+    }
+
+    private void ClearMailHtmlView()
+    {
+        try
+        {
+            if (_mailHtmlReady && MailReadHtml.CoreWebView2 != null)
+                MailReadHtml.NavigateToString("<!DOCTYPE html><html><body></body></html>");
+        }
+        catch { /* 忽略 */ }
+    }
+
     private void BtnMailBack_Click(object sender, RoutedEventArgs e)
     {
+        ClearMailHtmlView();
         // 返回只渲染缓存；ShowMailView 会处理宽→窄后的误收起
         ShowMailView(MailView.List);
         if (_mailCache.Count > 0)
@@ -1441,6 +1692,34 @@ public partial class MainWindow : Window
         }
         else
             _ = ReloadMailInboxAsync(force: false);
+    }
+
+    private async void BtnMailJunk_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mailBusy || _mailCurrent == null) return;
+        var detail = _mailCurrent;
+        var wasUnread = _mailCache.FirstOrDefault(m => m.Uid == detail.Uid) is { IsRead: false };
+
+        _mailBusy = true;
+        SetMailStatus("正在移到垃圾邮件…");
+        try
+        {
+            await Task.Run(async () => await _mail.MarkAsJunkAsync(detail.Uid));
+            _mailCache.RemoveAll(m => m.Uid == detail.Uid);
+            _mailCurrent = null;
+            ClearMailHtmlView();
+            if (wasUnread && _mailUnread > 0)
+                UpdateMailBadges(_mailUnread - 1);
+            ShowMailView(MailView.List);
+            RenderMailList(_mailCache);
+            SetMailStatus("已标记为垃圾邮件");
+            _ = PollMailUnreadAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("标记垃圾失败：" + ShortErr(ex));
+        }
+        finally { _mailBusy = false; }
     }
 
     private void BtnMailReply_Click(object sender, RoutedEventArgs e)
@@ -1512,13 +1791,279 @@ public partial class MainWindow : Window
         Paint(TabNoteBorder, TabNoteText, _tab == TabMode.Note);
         Paint(TabTodoBorder, TabTodoText, _tab == TabMode.Todo);
         Paint(TabMailBorder, TabMailText, _tab == TabMode.Mail);
+        Paint(TabAgentBorder, TabAgentText, _tab == TabMode.Agent);
 
         NotePanel.Visibility = _tab == TabMode.Note ? Visibility.Visible : Visibility.Collapsed;
         TodoPanel.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         MailPanel.Visibility = _tab == TabMode.Mail ? Visibility.Visible : Visibility.Collapsed;
-        // 日历只在「代办事项」显示
+        AgentPanel.Visibility = _tab == TabMode.Agent ? Visibility.Visible : Visibility.Collapsed;
+        // 日历只在「待办事项」显示
         CalendarHost.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    // ----- 大模型（cursor agent · WebView 时间线） -----
+
+    private async Task EnsureAgentTimelineAsync()
+    {
+        if (_agentTimelineReady && AgentTimeline.CoreWebView2 != null) return;
+        try
+        {
+            await AgentTimeline.EnsureCoreWebView2Async();
+            if (AgentTimeline.CoreWebView2 == null)
+                throw new InvalidOperationException("WebView2 初始化失败");
+
+            var settings = AgentTimeline.CoreWebView2.Settings;
+            settings.AreDefaultContextMenusEnabled = false;
+            settings.IsStatusBarEnabled = false;
+            settings.AreDevToolsEnabled = false;
+            settings.IsZoomControlEnabled = false;
+
+            var htmlPath = Path.Combine(AppContext.BaseDirectory, "Assets", "agent-timeline.html");
+            if (!File.Exists(htmlPath))
+                throw new FileNotFoundException("缺少 agent-timeline.html", htmlPath);
+
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnNav(object? s, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
+            {
+                AgentTimeline.CoreWebView2.NavigationCompleted -= OnNav;
+                if (e.IsSuccess) tcs.TrySetResult();
+                else tcs.TrySetException(new InvalidOperationException("时间线页面加载失败"));
+            }
+            AgentTimeline.CoreWebView2.NavigationCompleted += OnNav;
+            AgentTimeline.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
+            await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            _agentTimelineReady = true;
+        }
+        catch (Exception ex)
+        {
+            AgentStatus.Text = "时间线加载失败：" + ShortErr(ex);
+            _agentTimelineReady = false;
+        }
+    }
+
+    private void PostAgentUi(object payload)
+    {
+        if (!_agentTimelineReady || AgentTimeline.CoreWebView2 == null) return;
+        try
+        {
+            AgentTimeline.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(payload));
+        }
+        catch { /* ignore */ }
+    }
+
+    private static string AgentMarkdownToHtml(string markdown) =>
+        Markdown.ToHtml(markdown ?? "", AgentMdPipeline);
+
+    private void EnsureAgentWelcome()
+    {
+        UpdateAgentStatusLine();
+        if (_agentWelcomeShown) return;
+        var path = _agent.ResolveAgentPath();
+        var ws = CursorAgentClient.WorkspaceDir;
+        var skills = AgentSkillCatalog.FormatWelcomeBlock();
+        if (path != null)
+        {
+            AppendAgentSystem(
+                $"Agent 模式（可改文件、跑命令）。\n工作区：{ws}\nEnter 发送，Shift+Enter 换行。\n\n{skills}");
+        }
+        else
+        {
+            AppendAgentSystem(
+                "未找到 agent。优先装 Windows 版：\nirm 'https://cursor.com/install?win32=true' | iex\n或 WSL：\ncurl https://cursor.com/install -fsS | bash\n然后 agent login，再点「新任务」。\n\n" + skills);
+        }
+        _agentWelcomeShown = true;
+    }
+
+    private void UpdateAgentStatusLine()
+    {
+        var path = _agent.ResolveAgentPath();
+        var kind = _agent.RuntimeKind;
+        if (path == null)
+        {
+            AgentStatus.Text = "未检测到 agent";
+            return;
+        }
+        var runtime = kind == AgentRuntimeKind.Windows ? "Win" : "WSL";
+        AgentStatus.Text = $"{runtime} · Agent · {path}";
+    }
+
+    private async void BtnAgentNew_Click(object sender, RoutedEventArgs e)
+    {
+        if (_agentBusy) BtnAgentStop_Click(sender, e);
+        _agentHasSession = false;
+        _agentStreaming = false;
+        _agentStreamText = "";
+        _agentWelcomeShown = false;
+        await EnsureAgentTimelineAsync();
+        PostAgentUi(new { op = "clear" });
+        _agent.Refresh();
+        EnsureAgentWelcome();
+        AgentInput.Focus();
+    }
+
+    private void BtnAgentStop_Click(object sender, RoutedEventArgs e)
+    {
+        try { _agentCts?.Cancel(); } catch { /* ignore */ }
+        AgentStatus.Text = "已停止";
+    }
+
+    private void AgentInput_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift)
+        {
+            var tb = AgentInput;
+            var i = tb.CaretIndex;
+            tb.Text = tb.Text.Insert(i, Environment.NewLine);
+            tb.CaretIndex = i + Environment.NewLine.Length;
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            BtnAgentSend_Click(sender, new RoutedEventArgs());
+        }
+    }
+
+    private async void BtnAgentSend_Click(object sender, RoutedEventArgs e)
+    {
+        if (_agentBusy) return;
+        var prompt = (AgentInput.Text ?? "").Trim();
+        if (prompt.Length == 0) return;
+
+        await EnsureAgentTimelineAsync();
+        if (!_agentTimelineReady) return;
+
+        AgentInput.Text = "";
+        AppendAgentUserBubble(prompt);
+
+        _agentBusy = true;
+        BtnAgentStop.Visibility = Visibility.Visible;
+        AgentStatus.Text = "思考中…";
+        _agentCts = new CancellationTokenSource();
+        var continueSession = _agentHasSession;
+        _agentStreaming = false;
+        _agentStreamText = "";
+
+        try
+        {
+            var final = await Task.Run(async () =>
+                await _agent.ChatAsync(
+                    prompt,
+                    continueSession,
+                    AgentChatMode.Agent,
+                    delta => Dispatcher.Invoke(() => AppendAgentDelta(delta)),
+                    onLog: null,
+                    onTool: info => Dispatcher.Invoke(() => ApplyAgentToolCall(info)),
+                    _agentCts.Token));
+
+            SealAgentStreamBubble(fallbackIfEmpty: final);
+            _agentHasSession = true;
+            UpdateAgentStatusLine();
+        }
+        catch (OperationCanceledException)
+        {
+            SealAgentStreamBubble(fallbackIfEmpty: "（已取消）");
+            AgentStatus.Text = "已取消";
+        }
+        catch (Exception ex)
+        {
+            if (_agentStreaming && !string.IsNullOrWhiteSpace(_agentStreamText))
+            {
+                SealAgentStreamBubble();
+                AppendAgentSystem("出错：" + ShortErr(ex));
+            }
+            else
+            {
+                SealAgentStreamBubble(fallbackIfEmpty: "出错：" + ShortErr(ex));
+            }
+            AgentStatus.Text = "失败";
+        }
+        finally
+        {
+            _agentBusy = false;
+            _agentStreaming = false;
+            _agentStreamText = "";
+            BtnAgentStop.Visibility = Visibility.Collapsed;
+            _agentCts?.Dispose();
+            _agentCts = null;
+            if (AgentStatus.Text is "已取消" or "失败") { /* keep */ }
+            else UpdateAgentStatusLine();
+            PostAgentUi(new { op = "scroll" });
+        }
+    }
+
+    private void AppendAgentDelta(string delta)
+    {
+        _agentStreaming = true;
+        _agentStreamText += delta;
+        PostAgentUi(new { op = "delta", text = delta });
+    }
+
+    private void SealAgentStreamBubble(string? fallbackIfEmpty = null)
+    {
+        var raw = _agentStreamText;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            if (!string.IsNullOrWhiteSpace(fallbackIfEmpty))
+                raw = fallbackIfEmpty!;
+            else
+            {
+                if (_agentStreaming) PostAgentUi(new { op = "dropStream" });
+                _agentStreaming = false;
+                _agentStreamText = "";
+                return;
+            }
+        }
+
+        PostAgentUi(new { op = "seal", html = AgentMarkdownToHtml(raw) });
+        _agentStreaming = false;
+        _agentStreamText = "";
+    }
+
+    private void ApplyAgentToolCall(AgentToolCallInfo info)
+    {
+        SealAgentStreamBubble();
+        var label = AgentToolLabel(info.Kind);
+        var state = !info.Completed ? "running" : (info.Failed ? "fail" : "done");
+        PostAgentUi(new
+        {
+            op = "tool",
+            callId = info.CallId,
+            kind = info.Kind,
+            label,
+            detail = info.Detail ?? "",
+            state,
+            summary = info.ResultSummary ?? "",
+        });
+        AgentStatus.Text = info.Completed
+            ? (info.Failed ? label + " 失败" : label + " 完成")
+            : label + (string.IsNullOrEmpty(info.Detail) ? "…" : " " + TruncateUi(info.Detail, 28));
+    }
+
+    private static string AgentToolLabel(string kind) => kind.ToLowerInvariant() switch
+    {
+        "read" => "读取",
+        "write" => "写入",
+        "edit" => "编辑",
+        "delete" => "删除",
+        "shell" => "Shell",
+        "grep" => "搜索",
+        "glob" => "匹配文件",
+        "ls" or "list" => "列出目录",
+        "todo" => "待办",
+        "semsearch" or "semanticsearch" => "语义搜索",
+        _ => string.IsNullOrEmpty(kind) ? "工具" : kind,
+    };
+
+    private static string TruncateUi(string s, int n) =>
+        string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s[..n] + "…");
+
+    private void AppendAgentSystem(string text) =>
+        PostAgentUi(new { op = "system", text });
+
+    private void AppendAgentUserBubble(string text) =>
+        PostAgentUi(new { op = "user", text });
 
     private void ShowDoneHit_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -1913,7 +2458,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            BtnAddTodoFromNote.Content = "加入代办";
+            BtnAddTodoFromNote.Content = "加入待办";
             NoteListHost.Visibility = Visibility.Visible;
         }
     }
@@ -1950,7 +2495,7 @@ public partial class MainWindow : Window
 
         if (_editingTodoId != null)
         {
-            // 完成编辑 → 回代办
+            // 完成编辑 → 回待办
             ExitTodoEditMode();
             _tab = TabMode.Todo;
             StyleTabs();
@@ -1994,8 +2539,8 @@ public partial class MainWindow : Window
                 Margin = new Thickness(0, 0, 4, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 Background = on
-                    ? new SolidColorBrush(MediaColor.FromArgb(0x2E, 0x67, 0x50, 0xA4))
-                    : new SolidColorBrush(MediaColor.FromArgb(0x12, 0x67, 0x50, 0xA4)),
+                    ? new SolidColorBrush(MediaColor.FromArgb(0x2E, 0x00, 0x78, 0xD4))
+                    : new SolidColorBrush(MediaColor.FromArgb(0x12, 0x00, 0x78, 0xD4)),
                 Cursor = WpfCursors.Hand,
                 Tag = note.Id,
             };

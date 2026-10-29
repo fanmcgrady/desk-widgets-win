@@ -7,7 +7,7 @@ public sealed class MsSyncConfig
 {
     public string ClientId { get; set; } = "";
     public string ListId { get; set; } = "";
-    public string ListName { get; set; } = "侧栏代办";
+    public string ListName { get; set; } = "侧栏待办";
 
     private static string PathFile =>
         System.IO.Path.Combine(
