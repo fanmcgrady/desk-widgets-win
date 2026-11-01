@@ -677,6 +677,7 @@
           <Border Background="White" CornerRadius="8"
                   BorderBrush="#10000000" BorderThickness="1" ClipToBounds="True">
             <wv2:WebView2 x:Name="AgentTimeline"
+                          Focusable="False"
                           DefaultBackgroundColor="#FFF3F3F3"/>
           </Border>
         </DockPanel>

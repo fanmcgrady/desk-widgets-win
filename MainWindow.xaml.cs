@@ -105,6 +105,12 @@ public partial class MainWindow : Window
     private bool _shiftChorded; // 按住 Shift 期间按过别的键（打大写等）
     private DateTime _shiftDownUtc = DateTime.MinValue;
     private DateTime _lastShiftTapUtc = DateTime.MinValue;
+    /// <summary>连按 Shift 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
+    private DateTime _agentFocusRequestedUtc = DateTime.MinValue;
+    private DispatcherTimer? _agentFocusTimer;
+    private int _agentFocusTicks;
+    private bool _agentFocusBusy;
+    private bool _agentFocusHooked;
 
     // 全局唤醒：连按两下 Esc；大模型：连按两下 Shift；展开时 Alt+1..5 用 RegisterHotKey
     private const int HotkeyIdTabBase = 0xD510; // +1..+5
@@ -112,7 +118,10 @@ public partial class MainWindow : Window
     private const uint ModNoRepeat = 0x4000;
     private const uint WmHotkey = 0x0312;
     private const uint VkSpace = 0x20;
+    private const uint LlKhfInjected = 0x10;
     private const uint LlKhfAltDown = 0x20;
+    private const uint VkProcessKey = 0xE5;
+    private const uint VkPacket = 0xE7;
     private bool _tabHotkeysRegistered;
     private uint _lastHookFlags;
     private const int WhKeyboardLl = 13;
@@ -368,6 +377,21 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
@@ -766,6 +790,12 @@ public partial class MainWindow : Window
                 if (when != null && !when()) return;
                 if (activate && _expanded) Activate();
                 _escDismissArmed = false;
+                // 刚要求聚焦大模型输入框时，不要把焦点收走
+                if (ShouldKeepAgentInputFocus())
+                {
+                    FocusAgentInputCore();
+                    return;
+                }
                 BlurInputFocus();
             }
             catch { /* ignore */ }
@@ -924,25 +954,36 @@ public partial class MainWindow : Window
                 _lastEscTapUtc = DateTime.MinValue;
             }
 
-            // 双击 Shift → 大模型（始终放行，不吞键；与其它键组合则不算轻点）
-            if (isShift)
+            // 双击 Shift → 大模型。不吞键。低级钩子给出的是左右 Shift，不是 VK_SHIFT。
+            // 输入法在 Shift 按下期间会注入按键，那些不算「组合」，否则连按永远凑不齐。
+            var sideShift = info.VkCode is VkLShift or VkRShift;
+            if (sideShift && (info.Flags & LlKhfInjected) == 0)
             {
                 if (down && !_shiftHeld)
                 {
+                    var now = DateTime.UtcNow;
                     _shiftHeld = true;
                     _shiftChorded = false;
-                    _shiftDownUtc = DateTime.UtcNow;
+                    _shiftDownUtc = now;
+                    // 第二下按下就聚焦，不必等松开（松开超过 400ms 会被当成长按丢掉）
+                    if (_lastShiftTapUtc != DateTime.MinValue
+                        && now - _lastShiftTapUtc <= DoubleEscWindow)
+                    {
+                        _lastShiftTapUtc = DateTime.MinValue;
+                        Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+                    }
                 }
                 else if (up && _shiftHeld)
                 {
                     _shiftHeld = false;
                     var held = DateTime.UtcNow - _shiftDownUtc;
-                    if (!_shiftChorded && held <= EscTapMaxHold)
-                        OnShiftTap();
+                    _lastShiftTapUtc = !_shiftChorded && held <= EscTapMaxHold
+                        ? DateTime.UtcNow
+                        : DateTime.MinValue;
                     _shiftChorded = false;
                 }
             }
-            else if (down && _shiftHeld)
+            else if (down && _shiftHeld && !IsIgnorableShiftChord(info))
             {
                 _shiftChorded = true;
                 _lastShiftTapUtc = DateTime.MinValue;
@@ -953,6 +994,13 @@ public partial class MainWindow : Window
 
     private static bool IsShiftVk(uint vk) =>
         vk is VkShift or VkLShift or VkRShift;
+
+    /// <summary>输入法注入的键、包键，不算用户在 Shift 上叠加的组合键。</summary>
+    private static bool IsIgnorableShiftChord(KbdLlHookStruct info)
+    {
+        if ((info.Flags & LlKhfInjected) != 0) return true;
+        return info.VkCode is VkProcessKey or VkPacket or VkShift or VkLShift or VkRShift;
+    }
 
     /// <summary>钩子层：Esc / F1 / 网安←→↑↓空格；Alt+1..5 在热键未注册时作后备。</summary>
     private bool TryHandleInAppHotkeyFromHook(uint vk)
@@ -1045,19 +1093,6 @@ public partial class MainWindow : Window
         _lastEscTapUtc = now;
     }
 
-    private void OnShiftTap()
-    {
-        var now = DateTime.UtcNow;
-        if (_lastShiftTapUtc != DateTime.MinValue
-            && now - _lastShiftTapUtc <= DoubleEscWindow)
-        {
-            _lastShiftTapUtc = DateTime.MinValue;
-            Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
-            return;
-        }
-        _lastShiftTapUtc = now;
-    }
-
     private void UpdateTrayHotkeyTip()
     {
         if (_tray == null) return;
@@ -1073,6 +1108,7 @@ public partial class MainWindow : Window
     /// <summary>全局：连按两下 Shift，展开侧栏并切到大模型输入框。</summary>
     private void FocusAgentInputFromHotkey()
     {
+        _agentFocusRequestedUtc = DateTime.UtcNow;
         if (!_expanded) ExpandFromTray();
         else
         {
@@ -1080,6 +1116,105 @@ public partial class MainWindow : Window
             Topmost = true;
         }
         InvokeTabClick(TabAgent_Click);
+        FocusAgentInputSoon();
+    }
+
+    private bool ShouldKeepAgentInputFocus() =>
+        _expanded
+        && _tab == TabMode.Agent
+        && DateTime.UtcNow - _agentFocusRequestedUtc < TimeSpan.FromSeconds(2);
+
+    /// <summary>WebView 子窗会在页签切过来之后把键盘焦点抢走，所以多补几次。</summary>
+    private void FocusAgentInputSoon()
+    {
+        _agentFocusRequestedUtc = DateTime.UtcNow;
+        _agentFocusTicks = 10;
+        EnsureAgentFocusHooks();
+        FocusAgentInputCore();
+        Dispatcher.BeginInvoke(FocusAgentInputCore, DispatcherPriority.Input);
+        Dispatcher.BeginInvoke(FocusAgentInputCore, DispatcherPriority.ContextIdle);
+        Dispatcher.BeginInvoke(FocusAgentInputCore, DispatcherPriority.ApplicationIdle);
+        if (_agentFocusTimer == null)
+        {
+            _agentFocusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _agentFocusTimer.Tick += (_, _) =>
+            {
+                if (--_agentFocusTicks <= 0)
+                    _agentFocusTimer?.Stop();
+                FocusAgentInputCore();
+            };
+        }
+        _agentFocusTimer.Stop();
+        _agentFocusTimer.Start();
+    }
+
+    private void EnsureAgentFocusHooks()
+    {
+        if (_agentFocusHooked) return;
+        _agentFocusHooked = true;
+        AgentTimeline.Focusable = false;
+        KeyboardNavigation.SetIsTabStop(AgentTimeline, false);
+        AgentTimeline.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
+        CyberNewsWeb.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
+        CyberNewsWebPrefetch.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
+    }
+
+    private void WebView_PreviewGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (!ShouldKeepAgentInputFocus()) return;
+        e.Handled = true;
+        Dispatcher.BeginInvoke(FocusAgentInputCore, DispatcherPriority.Input);
+    }
+
+    private void FocusAgentInputCore()
+    {
+        if (!ShouldKeepAgentInputFocus() || _agentFocusBusy) return;
+        _agentFocusBusy = true;
+        try
+        {
+            ForceOurWindowForeground();
+            AgentInput.Focusable = true;
+            FocusManager.SetFocusedElement(this, AgentInput);
+            Keyboard.Focus(AgentInput);
+            AgentInput.Focus();
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+                SetFocus(hwnd);
+            // SetFocus 会同步触发 WM_SETFOCUS，可能把焦点写回 WebView，再放一次
+            Keyboard.Focus(AgentInput);
+            if (!AgentInput.IsKeyboardFocused)
+                AgentInput.Focus();
+        }
+        catch { /* ignore */ }
+        finally
+        {
+            _agentFocusBusy = false;
+        }
+    }
+
+    /// <summary>从别的程序连按 Shift 时，普通 Activate 经常拿不到前台，键盘仍留在原窗口。</summary>
+    private void ForceOurWindowForeground()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        var fg = GetForegroundWindow();
+        if (fg != hwnd)
+        {
+            uint fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+            var thisThread = GetCurrentThreadId();
+            if (fgThread != 0 && fgThread != thisThread)
+            {
+                AttachThreadInput(fgThread, thisThread, true);
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(fgThread, thisThread, false);
+            }
+            else
+            {
+                SetForegroundWindow(hwnd);
+            }
+        }
+        Activate();
+        Topmost = true;
     }
 
     private void UnregisterWakeHotkey()
@@ -2077,7 +2212,7 @@ public partial class MainWindow : Window
         AgentStatus.Text = "加载时间线…";
         await EnsureAgentTimelineAsync();
         await EnsureAgentWelcomeAsync();
-        AgentInput.Focus();
+        FocusAgentInputSoon();
     }
 
     // ----- 邮件（IMAP/SMTP，默认 mail.scu.edu.cn） -----
@@ -3491,15 +3626,7 @@ public partial class MainWindow : Window
                 if (isPrefetch) _cyberPrefetchNavHooked = true;
                 else _cyberWebNavHooked = true;
                 web.CoreWebView2.NavigationCompleted += CyberWeb_NavigationCompleted;
-                _ = web.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
-                    """
-                    document.documentElement.style.overflowX='hidden';
-                    document.documentElement.style.maxWidth='100%';
-                    if(document.body){
-                      document.body.style.overflowX='hidden';
-                      document.body.style.maxWidth='100%';
-                    }
-                    """);
+                _ = web.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(CyberPageCleaner.Script);
                 try
                 {
                     await web.CoreWebView2.CallDevToolsProtocolMethodAsync(
@@ -3524,6 +3651,9 @@ public partial class MainWindow : Window
     {
         try
         {
+            if (e.IsSuccess && sender is Microsoft.Web.WebView2.Core.CoreWebView2 core)
+                _ = core.ExecuteScriptAsync("window.__dwSweep&&window.__dwSweep()");
+
             // 预载完成：只记就绪，不改 UI
             if (ReferenceEquals(sender, CyberPrefetchWeb.CoreWebView2))
             {
@@ -3869,7 +3999,7 @@ public partial class MainWindow : Window
         PostAgentUi(new { op = "clear" });
         _agent.Refresh();
         await EnsureAgentWelcomeAsync();
-        AgentInput.Focus();
+        FocusAgentInputSoon();
     }
 
     private void BtnAgentStop_Click(object sender, RoutedEventArgs e)

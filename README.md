@@ -9,7 +9,7 @@ Windows 右侧吸附小窗：主题笔记、待办日历、网安热点、川大
 | 主题笔记 | Alt+1 | 本地主题笔记 |
 | 待办事项 | Alt+2 | 日历 + 待办，可同步 Microsoft To Do |
 | 收发邮件 | Alt+3 | IMAP/SMTP（默认 mail.scu.edu.cn） |
-| 网安热点 | Alt+4 | 嘶吼 / FreeBuf / 安全客 / CN-SEC / Seebug Paper / 先知 / Netlab / 玄武 / Krebs / Dark Reading / Unit 42 / Securelist；本地缓存，约每小时拉取累加未读；点开后从热点消失，可收藏；**→** 下一条，**←** 刷新，**↓**/空格下翻，**↑**/Shift+空格上翻 |
+| 网安热点 | Alt+4 | 嘶吼 / FreeBuf / 安全客 / Seebug Paper / 先知 / Netlab / 玄武 / Krebs / Dark Reading / Unit 42 / Securelist；本地缓存，约每小时拉取累加未读；点开后从热点消失，可收藏；**→** 下一条，**←** 刷新，**↓**/空格下翻，**↑**/Shift+空格上翻 |
 | 大模型 | Alt+5 | 调用本机 / WSL 的 `cursor-agent`，WebView 时间线展示工具步骤（另：连按两下 Shift 聚焦输入） |
 
 ### 全局 / 通用

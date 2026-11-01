@@ -30,7 +30,6 @@ public sealed class CyberNewsService
         "https://www.4hou.com/feed",                  // 嘶吼
         "https://www.freebuf.com/feed",               // FreeBuf
         "https://api.anquanke.com/data/v1/rss",       // 安全客
-        "https://cn-sec.com/feed",                    // CN-SEC
         "https://paper.seebug.org/rss/",              // 知道创宇 Paper
         // 国内研究 / 社区
         "https://xz.aliyun.com/feed",                 // 先知
@@ -48,7 +47,6 @@ public sealed class CyberNewsService
         ["4hou.com"] = "嘶吼",
         ["freebuf.com"] = "FreeBuf",
         ["anquanke.com"] = "安全客",
-        ["cn-sec.com"] = "CN-SEC",
         ["paper.seebug.org"] = "Seebug Paper",
         ["xz.aliyun.com"] = "先知",
         ["netlab.360.com"] = "360 Netlab",
@@ -93,10 +91,11 @@ public sealed class CyberNewsService
         var droppedHosts = new[]
         {
             "ithome.com", "solidot.org", "landiannews.com", "oschina.net", "sspai.com",
+            "cn-sec.com",
         };
         var droppedLabels = new[]
         {
-            "IT之家", "Solidot", "蓝点网", "开源中国", "少数派",
+            "IT之家", "Solidot", "蓝点网", "开源中国", "少数派", "CN-SEC",
         };
         var keepLabels = new HashSet<string>(FeedLabels.Values, StringComparer.OrdinalIgnoreCase);
         var remove = _inbox.Where(kv =>
