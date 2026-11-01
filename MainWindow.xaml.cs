@@ -282,6 +282,7 @@ public partial class MainWindow : Window
         _ = PollMailUnreadAsync(silent: true);
         UpdateCyberBadge();
         _ = PollCyberNewsAsync(silent: true);
+        StartupWatchWindow.ShowIfFreshBoot();
 
         var hide = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
         hide.Tick += (_, _) =>
@@ -654,7 +655,8 @@ public partial class MainWindow : Window
     {
         TabMode.Cyber => CyberReadingWidthDip(),
         TabMode.Agent => PanelWidthMailDip,
-        _ => PanelWidthDip, // 笔记 / 待办 / 邮件：窄栏
+        TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
+        _ => PanelWidthDip, // 笔记 / 待办 / 邮件列表：窄栏
     };
 
     /// <summary>网安页签：贴右缘向左铺满当前屏工作区。</summary>
@@ -871,7 +873,10 @@ public partial class MainWindow : Window
         _mouseHookInstalled = false;
     }
 
-    /// <summary>网安页：鼠标侧键回退改为下一篇。WebView 会自己吃掉该键，所以在钩子里吞掉。</summary>
+    /// <summary>
+    /// 鼠标侧键回退。WebView 会自己当成浏览器后退，所以在钩子里吞掉：
+    /// 网安页改为下一篇；阅读邮件时返回列表。
+    /// </summary>
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
@@ -881,14 +886,20 @@ public partial class MainWindow : Window
             {
                 var info = Marshal.PtrToStructure<MsLlHookStruct>(lParam);
                 var button = (info.MouseData >> 16) & 0xFFFF;
-                if (button == MouseXButton1
-                    && _expanded
-                    && _tab == TabMode.Cyber
-                    && IsOurWindowForeground())
+                if (button == MouseXButton1 && _expanded && IsOurWindowForeground())
                 {
-                    if (msg == WmXButtonDown)
-                        _ = Dispatcher.BeginInvoke(OpenCyberNewsNext, DispatcherPriority.Send);
-                    return (IntPtr)1;
+                    if (_tab == TabMode.Cyber)
+                    {
+                        if (msg == WmXButtonDown)
+                            _ = Dispatcher.BeginInvoke(OpenCyberNewsNext, DispatcherPriority.Send);
+                        return (IntPtr)1;
+                    }
+                    if (_tab == TabMode.Mail && _mailView == MailView.Read)
+                    {
+                        if (msg == WmXButtonDown)
+                            _ = Dispatcher.BeginInvoke(() => BtnMailBack_Click(this, new RoutedEventArgs()));
+                        return (IntPtr)1;
+                    }
                 }
             }
         }

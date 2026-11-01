@@ -19,7 +19,9 @@ public static class CyberPageCleaner
             'iframe[src*="adservice"],iframe[id^="google_ads"],[id^="div-gpt-ad"],',
             '[id^="google_ads_iframe"],.adsbygoogle,',
             '.modal-backdrop,.ant-modal-mask,.ant-modal-wrap,.el-overlay,.v-modal,',
-            '[class*="adsbygoogle"]{display:none!important;}'
+            '[class*="adsbygoogle"],',
+            '.floating-view,.floating-view-item,.link-badge-item-fixed,.mutual-fixed-wraper,',
+            '#link-wrapper-container,[class*="floating-view"]{display:none!important;}'
           ].join('');
           (document.head || document.documentElement).appendChild(css);
 
@@ -45,7 +47,26 @@ public static class CyberPageCleaner
             }
             if (el.getAttribute('data-ad') || el.getAttribute('data-ad-slot') || el.getAttribute('data-google-query-id'))
               return true;
-            return /(^|[^a-z0-9])(ads?|ad-box|adbox|adslot|advert|adsbygoogle|guanggao|sponsor|banner-ad)([^a-z0-9]|$)/.test(nameOf(el));
+            if (/(^|[^a-z0-9])(ads?|ad-box|adbox|adslot|advert|adsbygoogle|guanggao|sponsor|banner-ad)([^a-z0-9]|$)/.test(nameOf(el)))
+              return true;
+            return isFloatChrome(el);
+          }
+
+          function isFloatChrome(el) {
+            if (el.id === 'link-wrapper-container') return true;
+            return /floating-view|link-badge-item-fixed|mutual-fixed|qrcode-box|qrcode-xcx|float-ad|fixed-ad|suspension/.test(nameOf(el));
+          }
+
+          function isPromoFloat(el, s, r, text) {
+            if (!s || (s.position !== 'fixed' && s.position !== 'sticky')) return false;
+            if (r.width > 320 || r.width < 24 || r.height < 24) return false;
+            if (text.length > 40) return false;
+            var imgs = el.querySelectorAll('img');
+            for (var k = 0; k < imgs.length; k++) {
+              var ir = imgs[k].getBoundingClientRect();
+              if (ir.width >= 36 && ir.height >= 36) return true;
+            }
+            return false;
           }
 
           function hide(el) {
@@ -86,7 +107,7 @@ public static class CyberPageCleaner
               var text = '';
               try { text = (el.innerText || '').trim(); } catch (e2) { text = ''; }
               var popup = s.position === 'fixed' && zi >= 20 && r.width <= vw * 0.92 && r.height <= vh * 0.85 && text.length < 500;
-              if (!(covers || bar || side || corner || popup)) continue;
+              if (!(covers || bar || side || corner || popup || isPromoFloat(el, s, r, text))) continue;
               if (covers && el.querySelectorAll('p').length >= 4) continue;
               if (!covers && text.length > 700) continue;
               if (side && !covers && !bar) {
@@ -132,8 +153,11 @@ public static class CyberPageCleaner
           var timer = setInterval(function () {
             ticks++;
             kick();
-            if (ticks >= 12) clearInterval(timer);
-          }, 1500);
+            if (ticks === 8) {
+              clearInterval(timer);
+              timer = setInterval(kick, 3000);
+            }
+          }, 800);
         })();
         """;
 }
