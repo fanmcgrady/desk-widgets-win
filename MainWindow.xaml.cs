@@ -94,6 +94,9 @@ public partial class MainWindow : Window
     private bool _keyboardHookInstalled;
     private IntPtr _keyboardHook = IntPtr.Zero;
     private LowLevelKeyboardProc? _keyboardProc; // 防 GC 回收
+    private bool _mouseHookInstalled;
+    private IntPtr _mouseHook = IntPtr.Zero;
+    private LowLevelMouseProc? _mouseProc;
     private bool _escHeld;
     private bool _escChorded; // 按住 Esc 期间按过别的键
     private DateTime _escDownUtc = DateTime.MinValue;
@@ -113,6 +116,10 @@ public partial class MainWindow : Window
     private bool _tabHotkeysRegistered;
     private uint _lastHookFlags;
     private const int WhKeyboardLl = 13;
+    private const int WhMouseLl = 14;
+    private const int WmXButtonDown = 0x020B;
+    private const int WmXButtonUp = 0x020C;
+    private const uint MouseXButton1 = 1;
     private const int WmKeyDown = 0x0100;
     private const int WmKeyUp = 0x0101;
     private const int WmSysKeyDown = 0x0104;
@@ -325,6 +332,11 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
+    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowsHookEx", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookExMouse(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
@@ -339,6 +351,16 @@ public partial class MainWindow : Window
     {
         public uint VkCode;
         public uint ScanCode;
+        public uint Flags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MsLlHookStruct
+    {
+        public NativePoint Pt;
+        public uint MouseData;
         public uint Flags;
         public uint Time;
         public IntPtr DwExtraInfo;
@@ -400,6 +422,24 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    private delegate bool EnumChildProc(IntPtr hwnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hwndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out NativeRect lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref NativePoint lpPoint);
+
+    private const uint WmMouseWheel = 0x020A;
+    /// <summary>Windows 滚轮一格。Chromium 收到后按系统「一次滚动行数」换算，并做和鼠标相同的滑动。</summary>
+    private const int WheelDeltaUnit = 120;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X; public int Y; }
@@ -746,6 +786,7 @@ public partial class MainWindow : Window
         _hwndSource?.AddHook(WndProc);
 
         InstallKeyboardHook();
+        InstallMouseHook();
         UpdateTrayHotkeyTip();
     }
 
@@ -769,12 +810,59 @@ public partial class MainWindow : Window
         }
         _keyboardProc = null;
         _keyboardHookInstalled = false;
+        UninstallMouseHook();
         _escHeld = false;
         _escChorded = false;
         _lastEscTapUtc = DateTime.MinValue;
         _shiftHeld = false;
         _shiftChorded = false;
         _lastShiftTapUtc = DateTime.MinValue;
+    }
+
+    private void InstallMouseHook()
+    {
+        if (_mouseHookInstalled) return;
+        _mouseProc = MouseHookCallback;
+        using var proc = Process.GetCurrentProcess();
+        using var mod = proc.MainModule;
+        var hMod = GetModuleHandle(mod?.ModuleName);
+        _mouseHook = SetWindowsHookExMouse(WhMouseLl, _mouseProc, hMod, 0);
+        _mouseHookInstalled = _mouseHook != IntPtr.Zero;
+    }
+
+    private void UninstallMouseHook()
+    {
+        if (_mouseHook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_mouseHook);
+            _mouseHook = IntPtr.Zero;
+        }
+        _mouseProc = null;
+        _mouseHookInstalled = false;
+    }
+
+    /// <summary>网安页：鼠标侧键回退改为下一篇。WebView 会自己吃掉该键，所以在钩子里吞掉。</summary>
+    private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var msg = wParam.ToInt32();
+            if (msg is WmXButtonDown or WmXButtonUp)
+            {
+                var info = Marshal.PtrToStructure<MsLlHookStruct>(lParam);
+                var button = (info.MouseData >> 16) & 0xFFFF;
+                if (button == MouseXButton1
+                    && _expanded
+                    && _tab == TabMode.Cyber
+                    && IsOurWindowForeground())
+                {
+                    if (msg == WmXButtonDown)
+                        _ = Dispatcher.BeginInvoke(OpenCyberNewsNext, DispatcherPriority.Send);
+                    return (IntPtr)1;
+                }
+            }
+        }
+        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
     }
 
     /// <summary>前台是本窗或 WebView2 等子 HWND 时都算侧栏在前台（否则打开详情后快捷键全失效）。</summary>
@@ -1397,10 +1485,16 @@ public partial class MainWindow : Window
         return false;
     }
 
-    /// <summary>鼠标侧键回退（XButton1）在阅读邮件时返回列表。</summary>
+    /// <summary>鼠标侧键回退：网安页下一篇；阅读邮件时返回列表。网页区域由鼠标钩子处理。</summary>
     private void Window_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.XButton1) return;
+        if (_tab == TabMode.Cyber)
+        {
+            OpenCyberNewsNext();
+            e.Handled = true;
+            return;
+        }
         if (_tab != TabMode.Mail || _mailView != MailView.Read) return;
         BtnMailBack_Click(sender, new RoutedEventArgs());
         e.Handled = true;
@@ -3127,29 +3221,121 @@ public partial class MainWindow : Window
     private Microsoft.Web.WebView2.Wpf.WebView2 CyberPrefetchWeb =>
         _cyberWebFlipped ? CyberNewsWeb : CyberNewsWebPrefetch;
 
-    /// <summary>详情页翻页：↓/空格 下翻，↑/Shift+空格 上翻（一步 ≈ 滚轮一格）。</summary>
+    /// <summary>详情页翻页：↓/空格 下翻，↑/Shift+空格 上翻。走 WM_MOUSEWHEEL，滑动曲线与鼠标滚轮相同。</summary>
     private void ScrollCyberNewsPage(bool forward)
     {
         if (_tab != TabMode.Cyber || _cyberNewsOpen == null) return;
         var web = CyberActiveWeb;
         if (web.CoreWebView2 == null || web.Visibility != Visibility.Visible) return;
 
-        // 与滚轮一格一致：Chromium 常见 deltaY≈100；并尊重系统「一次滚动行数」
+        // 按住方向键时系统会连发；略作间隔，避免一秒钟滚出十几格。
+        // 间隔短于 Chromium 滚轮动画时长，连续格会接在同一段滑动上，而不是一跳一跳。
         var now = DateTime.UtcNow;
         if (now - _cyberScrollAtUtc < TimeSpan.FromMilliseconds(80)) return;
         _cyberScrollAtUtc = now;
 
-        var sign = forward ? 1 : -1;
+        // 滚轮向前（离开用户）是正值，页面向下的内容上移；下翻用负值。
+        var delta = forward ? -WheelDeltaUnit : WheelDeltaUnit;
+        if (!TryPostMouseWheel(web, delta))
+            SmoothScrollCyberFallback(web, forward);
+    }
+
+    /// <summary>把滚轮消息投到 WebView2 的渲染窗。命中点取页面中部，和光标停在正文上滚轮一样。</summary>
+    private static bool TryPostMouseWheel(Microsoft.Web.WebView2.Wpf.WebView2 web, int delta)
+    {
+        try
+        {
+            var host = web.Handle;
+            if (host == IntPtr.Zero) return false;
+            var target = FindRenderWidgetHost(host);
+            if (target == IntPtr.Zero) target = host;
+            if (!GetClientRect(target, out var rc)) return false;
+            var width = rc.Right - rc.Left;
+            var height = rc.Bottom - rc.Top;
+            if (width < 2 || height < 2) return false;
+
+            var pt = new NativePoint { X = width / 2, Y = height / 2 };
+            if (!ClientToScreen(target, ref pt)) return false;
+            return PostMessage(target, WmMouseWheel, MakeWheelWParam(delta), MakeLParam(pt.X, pt.Y));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static IntPtr FindRenderWidgetHost(IntPtr root)
+    {
+        IntPtr found = IntPtr.Zero;
+        var bestArea = 0;
+        EnumChildProc proc = (hwnd, _) =>
+        {
+            var sb = new System.Text.StringBuilder(256);
+            if (GetClassName(hwnd, sb, sb.Capacity) > 0
+                && sb.ToString().Contains("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal)
+                && GetClientRect(hwnd, out var rc))
+            {
+                var area = Math.Max(0, rc.Right - rc.Left) * Math.Max(0, rc.Bottom - rc.Top);
+                if (area >= bestArea)
+                {
+                    bestArea = area;
+                    found = hwnd;
+                }
+            }
+            return true;
+        };
+        EnumChildWindows(root, proc, IntPtr.Zero);
+        return found;
+    }
+
+    private static IntPtr MakeWheelWParam(int delta)
+    {
+        unchecked
+        {
+            return (IntPtr)((uint)(ushort)(short)delta << 16);
+        }
+    }
+
+    private static IntPtr MakeLParam(int x, int y)
+    {
+        unchecked
+        {
+            var packed = ((uint)(ushort)(short)y << 16) | (ushort)(short)x;
+            return (IntPtr)(int)packed;
+        }
+    }
+
+    /// <summary>渲染窗还没建好时的退路：追着目标滚动，连续按键接在同一段上。</summary>
+    private static void SmoothScrollCyberFallback(Microsoft.Web.WebView2.Wpf.WebView2 web, bool forward)
+    {
+        var step = forward ? 100 : -100;
         _ = web.CoreWebView2.ExecuteScriptAsync(
-            "(function(){"
-            + "var el=document.scrollingElement||document.documentElement||document.body;"
-            + "if(!el)return;"
-            + "var line=parseFloat(getComputedStyle(el).lineHeight);"
-            + "if(!line||isNaN(line))line=16;"
-            + "var lines=3;" // Windows 默认一次 3 行；与滚轮一格接近
-            + "var step=Math.round(line*lines)*" + sign + ";"
-            + "el.scrollBy(0,step);"
-            + "})()");
+            "(function(dy){"
+            + "var s=window.__dwWheel||(window.__dwWheel={raf:0,target:null,el:null});"
+            + "var cx=Math.floor(innerWidth/2),cy=Math.floor(innerHeight/2);"
+            + "function find(x,y){var n=document.elementFromPoint(x,y),h=0;"
+            + "while(n&&h++<25){if(n===document.body||n===document.documentElement)break;"
+            + "var oy=getComputedStyle(n).overflowY;"
+            + "if((oy==='auto'||oy==='scroll'||oy==='overlay')&&n.scrollHeight>n.clientHeight+4)return n;"
+            + "n=n.parentElement;}"
+            + "return document.scrollingElement||document.documentElement;}"
+            + "var el=find(cx,cy);if(!el)return;"
+            + "if(s.el!==el){s.el=el;s.target=null;}"
+            + "var max=Math.max(0,el.scrollHeight-el.clientHeight);"
+            + "var base=s.target==null?el.scrollTop:s.target;"
+            + "s.target=Math.max(0,Math.min(max,base+dy));"
+            + "if(s.raf)return;"
+            + "var last=performance.now();"
+            + "function frame(now){"
+            + "var dt=Math.min(48,now-last);last=now;"
+            + "var live=Math.max(0,el.scrollHeight-el.clientHeight);"
+            + "s.target=Math.max(0,Math.min(live,s.target));"
+            + "var left=s.target-el.scrollTop;"
+            + "if(Math.abs(left)<0.6){el.scrollTop=s.target;s.raf=0;s.target=null;return;}"
+            + "el.scrollTop+=left*(1-Math.exp(-dt/80));"
+            + "s.raf=requestAnimationFrame(frame);}"
+            + "s.raf=requestAnimationFrame(frame);"
+            + "})(" + step + ")");
     }
 
     /// <summary>当前列表里「下一条」候选（热点=未读头；收藏=下一项）。</summary>
