@@ -101,18 +101,15 @@ public partial class MainWindow : Window
     private bool _escChorded; // 按住 Esc 期间按过别的键
     private DateTime _escDownUtc = DateTime.MinValue;
     private DateTime _lastEscTapUtc = DateTime.MinValue;
-    private bool _shiftHeld;
-    private bool _shiftChorded; // 按住 Shift 期间按过别的键（打大写等）
-    private DateTime _shiftDownUtc = DateTime.MinValue;
-    private DateTime _lastShiftTapUtc = DateTime.MinValue;
-    /// <summary>连按 Shift 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
+    private bool _altSpaceHeld;
+    /// <summary>按下 Alt+空格 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
     private DateTime _agentFocusRequestedUtc = DateTime.MinValue;
     private DispatcherTimer? _agentFocusTimer;
     private int _agentFocusTicks;
     private bool _agentFocusBusy;
     private bool _agentFocusHooked;
 
-    // 全局唤醒：连按两下 Esc；大模型：连按两下 Shift；展开时 Alt+1..5 用 RegisterHotKey
+    // 全局唤醒：连按两下 Esc；大模型：Alt+空格；展开时 Alt+1..5 用 RegisterHotKey
     private const int HotkeyIdTabBase = 0xD510; // +1..+5
     private const uint ModAlt = 0x0001;
     private const uint ModNoRepeat = 0x4000;
@@ -120,8 +117,6 @@ public partial class MainWindow : Window
     private const uint VkSpace = 0x20;
     private const uint LlKhfInjected = 0x10;
     private const uint LlKhfAltDown = 0x20;
-    private const uint VkProcessKey = 0xE5;
-    private const uint VkPacket = 0xE7;
     private bool _tabHotkeysRegistered;
     private uint _lastHookFlags;
     private const int WhKeyboardLl = 13;
@@ -145,9 +140,9 @@ public partial class MainWindow : Window
     private const uint VkRight = 0x27;
     private const uint VkDown = 0x28;
     private const uint GaRoot = 2;
-    /// <summary>单次 Esc/Shift 轻点最长按住时间。</summary>
+    /// <summary>单次 Esc 轻点最长按住时间。</summary>
     private static readonly TimeSpan EscTapMaxHold = TimeSpan.FromMilliseconds(400);
-    /// <summary>两次轻点间隔上限（Esc 唤醒 / Shift 大模型）。</summary>
+    /// <summary>两次 Esc 轻点间隔上限。</summary>
     private static readonly TimeSpan DoubleEscWindow = TimeSpan.FromMilliseconds(450);
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
@@ -846,9 +841,7 @@ public partial class MainWindow : Window
         _escHeld = false;
         _escChorded = false;
         _lastEscTapUtc = DateTime.MinValue;
-        _shiftHeld = false;
-        _shiftChorded = false;
-        _lastShiftTapUtc = DateTime.MinValue;
+        _altSpaceHeld = false;
     }
 
     private void InstallMouseHook()
@@ -921,7 +914,7 @@ public partial class MainWindow : Window
     /// 键盘钩子约定：
     /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc / Alt+1..5 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
     ///   （PreviewKeyDown 仅作钩子未装上时的后备）
-    /// - 全局：Esc 连按两下唤醒侧栏；Shift 连按两下打开大模型（不吞键）
+    /// - 全局：Esc 连按两下唤醒侧栏；Alt+空格打开大模型（吞掉，避免系统菜单一起弹出）
     /// </summary>
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
@@ -932,6 +925,26 @@ public partial class MainWindow : Window
             var msg = wParam.ToInt32();
             var down = msg is WmKeyDown or WmSysKeyDown;
             var up = msg is WmKeyUp or WmSysKeyUp;
+
+            // Alt+空格是系统菜单键，必须在钩子里吞掉，否则会先弹出窗口菜单。
+            if (info.VkCode == VkSpace && (info.Flags & LlKhfInjected) == 0)
+            {
+                if (down && IsAltSpaceChord())
+                {
+                    if (!_altSpaceHeld)
+                    {
+                        _altSpaceHeld = true;
+                        Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+                    }
+                    return (IntPtr)1;
+                }
+                if (up && _altSpaceHeld)
+                {
+                    _altSpaceHeld = false;
+                    return (IntPtr)1;
+                }
+            }
+
             var ourFg = _expanded && IsOurWindowForeground();
             var isShift = IsShiftVk(info.VkCode);
 
@@ -964,54 +977,24 @@ public partial class MainWindow : Window
                 _escChorded = true;
                 _lastEscTapUtc = DateTime.MinValue;
             }
-
-            // 双击 Shift → 大模型。不吞键。低级钩子给出的是左右 Shift，不是 VK_SHIFT。
-            // 输入法在 Shift 按下期间会注入按键，那些不算「组合」，否则连按永远凑不齐。
-            var sideShift = info.VkCode is VkLShift or VkRShift;
-            if (sideShift && (info.Flags & LlKhfInjected) == 0)
-            {
-                if (down && !_shiftHeld)
-                {
-                    var now = DateTime.UtcNow;
-                    _shiftHeld = true;
-                    _shiftChorded = false;
-                    _shiftDownUtc = now;
-                    // 第二下按下就聚焦，不必等松开（松开超过 400ms 会被当成长按丢掉）
-                    if (_lastShiftTapUtc != DateTime.MinValue
-                        && now - _lastShiftTapUtc <= DoubleEscWindow)
-                    {
-                        _lastShiftTapUtc = DateTime.MinValue;
-                        Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
-                    }
-                }
-                else if (up && _shiftHeld)
-                {
-                    _shiftHeld = false;
-                    var held = DateTime.UtcNow - _shiftDownUtc;
-                    _lastShiftTapUtc = !_shiftChorded && held <= EscTapMaxHold
-                        ? DateTime.UtcNow
-                        : DateTime.MinValue;
-                    _shiftChorded = false;
-                }
-            }
-            else if (down && _shiftHeld && !IsIgnorableShiftChord(info))
-            {
-                _shiftChorded = true;
-                _lastShiftTapUtc = DateTime.MinValue;
-            }
         }
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
 
+    /// <summary>Alt 按下、Ctrl/Shift 都没按下。左右 Alt 都算。</summary>
+    private static bool IsAltSpaceChord()
+    {
+        var altDown = (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0
+                      || (GetAsyncKeyState(0xA4) & 0x8000) != 0
+                      || (GetAsyncKeyState(0xA5) & 0x8000) != 0;
+        if (!altDown) return false;
+        if ((GetAsyncKeyState((int)VkControl) & 0x8000) != 0) return false;
+        if ((GetAsyncKeyState((int)VkShift) & 0x8000) != 0) return false;
+        return true;
+    }
+
     private static bool IsShiftVk(uint vk) =>
         vk is VkShift or VkLShift or VkRShift;
-
-    /// <summary>输入法注入的键、包键，不算用户在 Shift 上叠加的组合键。</summary>
-    private static bool IsIgnorableShiftChord(KbdLlHookStruct info)
-    {
-        if ((info.Flags & LlKhfInjected) != 0) return true;
-        return info.VkCode is VkProcessKey or VkPacket or VkShift or VkLShift or VkRShift;
-    }
 
     /// <summary>钩子层：Esc / F1 / 网安←→↑↓空格；Alt+1..5 在热键未注册时作后备。</summary>
     private bool TryHandleInAppHotkeyFromHook(uint vk)
@@ -1111,12 +1094,12 @@ public partial class MainWindow : Window
         if (_keyboardHookInstalled)
         {
             parts.Add("连按两下 Esc");
-            parts.Add("连按两下 Shift 大模型");
+            parts.Add("Alt+空格 大模型");
         }
         _tray.Text = string.Join(" · ", parts);
     }
 
-    /// <summary>全局：连按两下 Shift，展开侧栏并切到大模型输入框。</summary>
+    /// <summary>全局：Alt+空格，展开侧栏并切到大模型输入框。</summary>
     private void FocusAgentInputFromHotkey()
     {
         _agentFocusRequestedUtc = DateTime.UtcNow;
@@ -1203,7 +1186,7 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>从别的程序连按 Shift 时，普通 Activate 经常拿不到前台，键盘仍留在原窗口。</summary>
+    /// <summary>从别的程序按 Alt+空格 时，普通 Activate 经常拿不到前台，键盘仍留在原窗口。</summary>
     private void ForceOurWindowForeground()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
@@ -1465,6 +1448,14 @@ public partial class MainWindow : Window
     {
         // F1 → 钉住 / 取消钉住（含 System 键路径，避免输入框吞掉）
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Space
+            && (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt
+            && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == ModifierKeys.None)
+        {
+            FocusAgentInputFromHotkey();
+            e.Handled = true;
+            return;
+        }
         if (key == Key.F1)
         {
             BtnPin_Click(sender, new RoutedEventArgs());
@@ -1679,7 +1670,7 @@ public partial class MainWindow : Window
             menu.Items.Add(item);
         }
         AddItem("展开侧栏\t连按两下 Esc", (_, _) => Dispatcher.Invoke(ExpandFromTray));
-        AddItem("大模型输入\t连按两下 Shift", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
+        AddItem("大模型输入\tAlt+空格", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
         AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
         AddItem("登录并同步", async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));

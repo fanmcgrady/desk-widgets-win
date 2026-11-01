@@ -222,7 +222,7 @@
         </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Alt+5 · 连按两下 Shift">
+                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Alt+5 · Alt+空格">
           <TextBlock x:Name="TabAgentText" Text="模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
@@ -668,7 +668,7 @@
                        AcceptsReturn="False" TextWrapping="Wrap"
                        FontSize="13" MinHeight="22" MaxHeight="88"
                        VerticalScrollBarVisibility="Auto"
-                       ToolTip="连按两下 Shift 聚焦 · Enter 发送 · Shift+Enter 换行"
+                       ToolTip="Alt+空格 聚焦 · Enter 发送 · Shift+Enter 换行"
                        GotKeyboardFocus="Input_GotFocus"
                        LostKeyboardFocus="Input_LostFocus"
                        PreviewKeyDown="AgentInput_PreviewKeyDown"/>
