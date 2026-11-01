@@ -26,35 +26,37 @@ public sealed class CyberNewsService
 
     private static readonly string[] FeedUrls =
     {
-        // 快讯 / 科技热点（标题党少、扫一眼能懂）
-        "https://www.solidot.org/index.rss",          // Solidot
-        "https://www.ithome.com/rss/",                // IT之家
-        "https://www.landiannews.com/feed",           // 蓝点网
-        "https://www.oschina.net/news/rss",           // 开源中国·资讯
-        "https://sspai.com/feed",                     // 少数派
-        // 网安媒体（偏新闻，不是长文分析）
+        // 国内网安媒体
         "https://www.4hou.com/feed",                  // 嘶吼
         "https://www.freebuf.com/feed",               // FreeBuf
-        "https://krebsonsecurity.com/feed/",          // Krebs
-        // 技术详情博客（可慢看）
+        "https://api.anquanke.com/data/v1/rss",       // 安全客
+        "https://cn-sec.com/feed",                    // CN-SEC
+        "https://paper.seebug.org/rss/",              // 知道创宇 Paper
+        // 国内研究 / 社区
         "https://xz.aliyun.com/feed",                 // 先知
         "https://blog.netlab.360.com/rss",            // 360 Netlab
         "https://xlab.tencent.com/cn/atom.xml",       // 腾讯玄武
+        // 国际网安
+        "https://krebsonsecurity.com/feed/",          // Krebs
+        "https://www.darkreading.com/rss.xml",        // Dark Reading
+        "https://unit42.paloaltonetworks.com/feed/",  // Unit 42
+        "https://securelist.com/feed/",               // Kaspersky Securelist
     };
 
     private static readonly Dictionary<string, string> FeedLabels = new()
     {
-        ["solidot.org"] = "Solidot",
-        ["ithome.com"] = "IT之家",
-        ["landiannews.com"] = "蓝点网",
-        ["oschina.net"] = "开源中国",
-        ["sspai.com"] = "少数派",
         ["4hou.com"] = "嘶吼",
         ["freebuf.com"] = "FreeBuf",
-        ["krebsonsecurity.com"] = "Krebs",
+        ["anquanke.com"] = "安全客",
+        ["cn-sec.com"] = "CN-SEC",
+        ["paper.seebug.org"] = "Seebug Paper",
         ["xz.aliyun.com"] = "先知",
         ["netlab.360.com"] = "360 Netlab",
         ["tencent.com"] = "腾讯玄武",
+        ["krebsonsecurity.com"] = "Krebs",
+        ["darkreading.com"] = "Dark Reading",
+        ["unit42.paloaltonetworks.com"] = "Unit 42",
+        ["securelist.com"] = "Securelist",
     };
 
     private readonly string _readPath;
@@ -80,8 +82,46 @@ public sealed class CyberNewsService
         _favorites = LoadFavorites(_favPath);
         _inbox = LoadInbox(_inboxPath);
         _lastFetchUtc = LoadLastFetchUtc(_lastFetchPath);
-        // 启动时清掉已读残留
-        PruneReadFromInbox(save: true);
+        // 启动时清掉已读残留，并去掉已下线 / 非网安源
+        PruneReadFromInbox(save: false);
+        PruneDroppedSourcesFromInbox(save: true);
+    }
+
+    private void PruneDroppedSourcesFromInbox(bool save)
+    {
+        // 旧综合科技源 + 已下线源；以及 Source 标签不在当前 FeedLabels 里的条目
+        var droppedHosts = new[]
+        {
+            "ithome.com", "solidot.org", "landiannews.com", "oschina.net", "sspai.com",
+        };
+        var droppedLabels = new[]
+        {
+            "IT之家", "Solidot", "蓝点网", "开源中国", "少数派",
+        };
+        var keepLabels = new HashSet<string>(FeedLabels.Values, StringComparer.OrdinalIgnoreCase);
+        var remove = _inbox.Where(kv =>
+            {
+                var item = kv.Value;
+                if (droppedLabels.Any(l =>
+                        item.Source.Contains(l, StringComparison.OrdinalIgnoreCase)))
+                    return true;
+                if (droppedHosts.Any(h =>
+                        (item.Link?.Contains(h, StringComparison.OrdinalIgnoreCase) ?? false)
+                        || kv.Key.Contains(h, StringComparison.OrdinalIgnoreCase)))
+                    return true;
+                // Source 对不上当前网安源标签的，一律清掉
+                return !keepLabels.Contains(item.Source);
+            })
+            .Select(kv => kv.Key)
+            .ToList();
+        if (remove.Count == 0)
+        {
+            if (save) SaveInbox();
+            return;
+        }
+        foreach (var id in remove)
+            _inbox.Remove(id);
+        if (save) SaveInbox();
     }
 
     public int UnreadCount => _inbox.Count;

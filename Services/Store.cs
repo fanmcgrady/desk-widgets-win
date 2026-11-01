@@ -360,6 +360,32 @@ public sealed class Store
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>按给定 id 顺序写回未完成项的 sort_order（下标即顺序）。</summary>
+    public void ReorderTodos(IReadOnlyList<string> orderedIds)
+    {
+        if (orderedIds == null || orderedIds.Count == 0) return;
+        using var con = Open();
+        using var tx = con.BeginTransaction();
+        var ts = NowMs();
+        for (var i = 0; i < orderedIds.Count; i++)
+        {
+            var id = orderedIds[i];
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            using var cmd = con.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                """
+                UPDATE todos SET sort_order=$ord, updated_at=$ts
+                WHERE id=$id AND deleted=0 AND done=0
+                """;
+            cmd.Parameters.AddWithValue("$ord", i);
+            cmd.Parameters.AddWithValue("$ts", ts);
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
     public void DeleteTodo(string id)
     {
         using var con = Open();

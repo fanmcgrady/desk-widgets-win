@@ -26,9 +26,9 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>收起贴边条宽度。</summary>
+    /// <summary>收起贴边条 / 笔记·待办·邮件 窄栏宽度。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>展开统一宽度（与大模型一致）。</summary>
+    /// <summary>大模型等宽栏宽度。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 8;
     /// <summary>右缘顶部死区（约等于最大化窗口关闭按钮高度），避免关窗时误触展开。</summary>
@@ -48,7 +48,19 @@ public partial class MainWindow : Window
     private CyberNewsItem? _cyberNewsOpen;
     private bool _cyberNewsLoading;
     private bool _cyberWebReady;
+    private bool _cyberPrefetchWebReady;
     private bool _cyberWebNavHooked;
+    private bool _cyberPrefetchNavHooked;
+    /// <summary>true 时 CyberNewsWebPrefetch 为前台，CyberNewsWeb 为预载。</summary>
+    private bool _cyberWebFlipped;
+    /// <summary>详情导航代数：连按切换时只认最新一次。</summary>
+    private int _cyberWebNavEpoch;
+    private string? _cyberWebTargetUrl;
+    private string? _cyberPrefetchUrl;
+    private int _cyberPrefetchEpoch;
+    private bool _cyberPrefetchReady;
+    private CancellationTokenSource? _cyberNavCts;
+    private DateTime _cyberScrollAtUtc = DateTime.MinValue;
     private CyberListMode _cyberListMode = CyberListMode.Hot;
     private static readonly MarkdownPipeline AgentMdPipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
@@ -79,7 +91,6 @@ public partial class MainWindow : Window
     private WinForms.NotifyIcon? _tray;
     private DrawingIcon? _trayIcon;
     private HwndSource? _hwndSource;
-    private bool _agentHotkeyRegistered;
     private bool _keyboardHookInstalled;
     private IntPtr _keyboardHook = IntPtr.Zero;
     private LowLevelKeyboardProc? _keyboardProc; // 防 GC 回收
@@ -87,13 +98,20 @@ public partial class MainWindow : Window
     private bool _escChorded; // 按住 Esc 期间按过别的键
     private DateTime _escDownUtc = DateTime.MinValue;
     private DateTime _lastEscTapUtc = DateTime.MinValue;
+    private bool _shiftHeld;
+    private bool _shiftChorded; // 按住 Shift 期间按过别的键（打大写等）
+    private DateTime _shiftDownUtc = DateTime.MinValue;
+    private DateTime _lastShiftTapUtc = DateTime.MinValue;
 
-    // 全局唤醒：连按两下 Esc；大模型输入：Alt+Space
-    private const int HotkeyIdAgent = 0xD502;
+    // 全局唤醒：连按两下 Esc；大模型：连按两下 Shift；展开时 Alt+1..5 用 RegisterHotKey
+    private const int HotkeyIdTabBase = 0xD510; // +1..+5
     private const uint ModAlt = 0x0001;
     private const uint ModNoRepeat = 0x4000;
     private const uint WmHotkey = 0x0312;
     private const uint VkSpace = 0x20;
+    private const uint LlKhfAltDown = 0x20;
+    private bool _tabHotkeysRegistered;
+    private uint _lastHookFlags;
     private const int WhKeyboardLl = 13;
     private const int WmKeyDown = 0x0100;
     private const int WmKeyUp = 0x0101;
@@ -102,13 +120,18 @@ public partial class MainWindow : Window
     private const uint VkControl = 0x11;
     private const uint VkMenu = 0x12; // Alt
     private const uint VkShift = 0x10;
+    private const uint VkLShift = 0xA0;
+    private const uint VkRShift = 0xA1;
     private const uint VkF1 = 0x70;
     private const uint VkEscape = 0x1B;
+    private const uint VkLeft = 0x25;
+    private const uint VkUp = 0x26;
+    private const uint VkRight = 0x27;
     private const uint VkDown = 0x28;
     private const uint GaRoot = 2;
-    /// <summary>单次 Esc 轻点最长按住时间。</summary>
+    /// <summary>单次 Esc/Shift 轻点最长按住时间。</summary>
     private static readonly TimeSpan EscTapMaxHold = TimeSpan.FromMilliseconds(400);
-    /// <summary>两次轻点间隔上限。</summary>
+    /// <summary>两次轻点间隔上限（Esc 唤醒 / Shift 大模型）。</summary>
     private static readonly TimeSpan DoubleEscWindow = TimeSpan.FromMilliseconds(450);
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
@@ -140,17 +163,46 @@ public partial class MainWindow : Window
     /// <summary>输入框里已按过一次 Esc；再按则收起（避免 NoteEdit 抢回焦点后两段 Esc 失效）。</summary>
     private bool _escDismissArmed;
     private bool _syncing;
-
+    /// <summary>Accent 亚克力是否已挂上（失败时退回半透明实色）。</summary>
+    private bool _acrylicApplied;
     private string? _activeNoteId;
     private string? _editingTodoId; // 从待办「编辑」进入时，笔记区改的是这条待办
     private bool _noteLoading;
     private bool _noteWriting;
     private DispatcherTimer? _noteSaveTimer;
     private DispatcherTimer? _noteReloadDebounce;
+    // 待办拖拽排序
+    private string? _todoDragId;
+    private System.Windows.Point _todoDragStart;
+    private bool _todoDragging;
+    private bool _todoDragSuppressClick;
+    private Border? _todoDragRow;
+    private Border? _todoInsertLine;
+    private int _todoInsertIndex = -1;
+    private const double TodoDragThreshold = 6;
 
     public MainWindow()
     {
+        AllowsTransparency = true;
+        Background = MediaBrushes.Transparent;
+
         InitializeComponent();
+
+        // 先铺浅罩，Accent 挂上后可见模糊；失败则加浓实色
+        PanelShell.Background = new SolidColorBrush(MediaColor.FromArgb(0x90, 0xF5, 0xF5, 0xF7));
+        SourceInitialized += (_, _) => ApplyGlassEffect();
+        Loaded += (_, _) =>
+        {
+            ApplyGlassEffect();
+            var retry = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            retry.Tick += (_, _) =>
+            {
+                retry.Stop();
+                ApplyGlassEffect();
+            };
+            retry.Start();
+        };
+
         _sync = new MsToDoSync(_store);
         var now = DateTime.Today;
         _year = now.Year;
@@ -201,8 +253,12 @@ public partial class MainWindow : Window
         UpdateNoteChrome();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _dockScreen = PickDefaultDockScreen();
-        Expand();
+        // 先装钩子/热键，再展开并清掉 NoteEdit 焦点，否则首次 Alt+数字会被输入框吃掉
         RegisterWakeHotkey();
+        Expand();
+        ScheduleShellFocusReclaim();
+        Activated += (_, _) => { if (_expanded) RegisterTabHotkeys(); };
+        Deactivated += (_, _) => UnregisterTabHotkeys();
         _edgeTimer.Start();
         _syncTimer.Start();
         _mailPollTimer.Start();
@@ -296,6 +352,45 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    private const uint KeyeventfKeyup = 0x0002;
+    private const byte VkW = 0x57;
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+    private enum AccentState
+    {
+        Disabled = 0,
+        EnableBlurBehind = 3,
+        EnableAcrylicBlurBehind = 4,
+        EnableHostBackdrop = 5,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AccentPolicy
+    {
+        public AccentState AccentState;
+        public uint AccentFlags;
+        public uint GradientColor; // ABGR
+        public uint AnimationId;
+    }
+
+    private enum WindowCompositionAttribute
+    {
+        WcaAccentPolicy = 19,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowCompositionAttributeData
+    {
+        public WindowCompositionAttribute Attribute;
+        public IntPtr Data;
+        public int SizeOfData;
+    }
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
@@ -416,10 +511,87 @@ public partial class MainWindow : Window
             helper.EnsureHandle();
     }
 
-    private double ActivePanelWidthDip =>
-        _tab == TabMode.Cyber
-            ? CyberReadingWidthDip()
-            : PanelWidthMailDip;
+    /// <summary>Accent 亚克力/模糊（配 AllowsTransparency）。系统「透明效果」需打开。</summary>
+    private void ApplyGlassEffect()
+    {
+        // 成功时浅罩透出模糊；失败时加浓，避免整窗全透
+        var frostLite = new SolidColorBrush(MediaColor.FromArgb(0x66, 0xF5, 0xF5, 0xF7));
+        var frostSolid = new SolidColorBrush(MediaColor.FromArgb(0xC8, 0xF5, 0xF5, 0xF7));
+        try
+        {
+            EnsureHwnd();
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+
+            Background = MediaBrushes.Transparent;
+            // 让 DWM 模糊能透过 WPF 清屏色
+            var src = HwndSource.FromHwnd(hwnd);
+            if (src?.CompositionTarget != null)
+                src.CompositionTarget.BackgroundColor = Colors.Transparent;
+
+            // GradientColor=ABGR；优先亚克力，再普通模糊
+            var tintAbgr = unchecked((uint)((0xA8 << 24) | (0xF8 << 16) | (0xF7 << 8) | 0xF5));
+
+            if (TrySetAccent(hwnd, AccentState.EnableAcrylicBlurBehind, tintAbgr)
+                || TrySetAccent(hwnd, AccentState.EnableBlurBehind, tintAbgr))
+            {
+                _acrylicApplied = true;
+                PanelShell.Background = frostLite;
+                return;
+            }
+
+            if (!_acrylicApplied)
+                PanelShell.Background = frostSolid;
+        }
+        catch
+        {
+            if (_acrylicApplied) return;
+            try { PanelShell.Background = frostSolid; }
+            catch { /* ignore */ }
+        }
+    }
+
+    private static bool TrySetAccent(IntPtr hwnd, AccentState state, uint gradientAbgr)
+    {
+        try
+        {
+            var policy = new AccentPolicy
+            {
+                AccentState = state,
+                AccentFlags = 2, // 画满客户区
+                GradientColor = gradientAbgr,
+                AnimationId = 0,
+            };
+            var size = Marshal.SizeOf<AccentPolicy>();
+            var ptr = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(policy, ptr, false);
+                var data = new WindowCompositionAttributeData
+                {
+                    Attribute = WindowCompositionAttribute.WcaAccentPolicy,
+                    Data = ptr,
+                    SizeOfData = size,
+                };
+                return SetWindowCompositionAttribute(hwnd, ref data) != 0;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(ptr);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private double ActivePanelWidthDip => _tab switch
+    {
+        TabMode.Cyber => CyberReadingWidthDip(),
+        TabMode.Agent => PanelWidthMailDip,
+        _ => PanelWidthDip, // 笔记 / 待办 / 邮件：窄栏
+    };
 
     /// <summary>网安页签：贴右缘向左铺满当前屏工作区。</summary>
     private double CyberReadingWidthDip()
@@ -470,7 +642,11 @@ public partial class MainWindow : Window
         Width = dipW;
         Height = h / scale;
         MoveWindow(hwnd, x, y, widthPx, h, true);
-        if (expanded) Show();
+        if (expanded)
+        {
+            Show();
+            ApplyGlassEffect();
+        }
     }
 
     private void PlaceExpanded()
@@ -503,6 +679,9 @@ public partial class MainWindow : Window
         PlaceExpanded();
         Activate();
         Topmost = true;
+        RegisterTabHotkeys();
+        // 首次/每次展开都清输入焦点，保证 Alt+数字走热键而不是进 NoteEdit
+        ScheduleShellFocusReclaim();
     }
 
     /// <summary>托盘 / 菜单唤起：展开后等鼠标进侧栏再启用自动收起。</summary>
@@ -567,8 +746,6 @@ public partial class MainWindow : Window
         _hwndSource?.AddHook(WndProc);
 
         InstallKeyboardHook();
-        _agentHotkeyRegistered = RegisterHotKey(hwnd, HotkeyIdAgent, ModAlt | ModNoRepeat, VkSpace)
-                                 || RegisterHotKey(hwnd, HotkeyIdAgent, ModAlt, VkSpace);
         UpdateTrayHotkeyTip();
     }
 
@@ -595,6 +772,9 @@ public partial class MainWindow : Window
         _escHeld = false;
         _escChorded = false;
         _lastEscTapUtc = DateTime.MinValue;
+        _shiftHeld = false;
+        _shiftChorded = false;
+        _lastShiftTapUtc = DateTime.MinValue;
     }
 
     /// <summary>前台是本窗或 WebView2 等子 HWND 时都算侧栏在前台（否则打开详情后快捷键全失效）。</summary>
@@ -610,21 +790,23 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 键盘钩子约定：
-    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc / Alt+1..5 / F1 / 网安↓ 由钩子吞掉并处理
+    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc / Alt+1..5 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
     ///   （PreviewKeyDown 仅作钩子未装上时的后备）
-    /// - 否则：只统计 Esc 轻点，连按两下唤醒；不抢其它程序的 Esc
+    /// - 全局：Esc 连按两下唤醒侧栏；Shift 连按两下打开大模型（不吞键）
     /// </summary>
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
         {
             var info = Marshal.PtrToStructure<KbdLlHookStruct>(lParam);
+            _lastHookFlags = info.Flags;
             var msg = wParam.ToInt32();
             var down = msg is WmKeyDown or WmSysKeyDown;
             var up = msg is WmKeyUp or WmSysKeyUp;
             var ourFg = _expanded && IsOurWindowForeground();
+            var isShift = IsShiftVk(info.VkCode);
 
-            if (down && ourFg && TryHandleInAppHotkeyFromHook(info.VkCode))
+            if (down && ourFg && !isShift && TryHandleInAppHotkeyFromHook(info.VkCode))
             {
                 if (info.VkCode == VkEscape)
                     _lastEscTapUtc = DateTime.MinValue;
@@ -648,19 +830,47 @@ public partial class MainWindow : Window
                     _escChorded = false;
                 }
             }
-            else if (down && _escHeld)
+            else if (down && _escHeld && !isShift)
             {
                 _escChorded = true;
                 _lastEscTapUtc = DateTime.MinValue;
+            }
+
+            // 双击 Shift → 大模型（始终放行，不吞键；与其它键组合则不算轻点）
+            if (isShift)
+            {
+                if (down && !_shiftHeld)
+                {
+                    _shiftHeld = true;
+                    _shiftChorded = false;
+                    _shiftDownUtc = DateTime.UtcNow;
+                }
+                else if (up && _shiftHeld)
+                {
+                    _shiftHeld = false;
+                    var held = DateTime.UtcNow - _shiftDownUtc;
+                    if (!_shiftChorded && held <= EscTapMaxHold)
+                        OnShiftTap();
+                    _shiftChorded = false;
+                }
+            }
+            else if (down && _shiftHeld)
+            {
+                _shiftChorded = true;
+                _lastShiftTapUtc = DateTime.MinValue;
             }
         }
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
 
-    /// <summary>钩子层：Esc / Alt+数字 / F1 / 网安↓。</summary>
+    private static bool IsShiftVk(uint vk) =>
+        vk is VkShift or VkLShift or VkRShift;
+
+    /// <summary>钩子层：Esc / F1 / 网安←→↑↓空格；Alt+1..5 在热键未注册时作后备。</summary>
     private bool TryHandleInAppHotkeyFromHook(uint vk)
     {
-        var altDown = (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0;
+        var altDown = (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0
+                      || (_lastHookFlags & LlKhfAltDown) != 0;
         var ctrlDown = (GetAsyncKeyState((int)VkControl) & 0x8000) != 0;
         var shiftDown = (GetAsyncKeyState((int)VkShift) & 0x8000) != 0;
 
@@ -677,14 +887,38 @@ public partial class MainWindow : Window
         }
 
         // 不看 _inputFocused：WebView 不会置该标志
-        if (!altDown && !ctrlDown && !shiftDown && vk == VkDown
-            && _tab == TabMode.Cyber)
+        // 网安：→ 下一条，← 刷新；详情 ↓/空格 下翻，↑/Shift+空格 上翻
+        if (!altDown && !ctrlDown && _tab == TabMode.Cyber)
         {
-            _ = Dispatcher.BeginInvoke(OpenCyberNewsNext, DispatcherPriority.Send);
-            return true;
+            if (!shiftDown && vk == VkRight)
+            {
+                _ = Dispatcher.BeginInvoke(OpenCyberNewsNext, DispatcherPriority.Send);
+                return true;
+            }
+            if (!shiftDown && vk == VkLeft)
+            {
+                _ = Dispatcher.BeginInvoke(RefreshCyberNewsFromHotkey, DispatcherPriority.Send);
+                return true;
+            }
+            if (_cyberNewsOpen != null)
+            {
+                if (!shiftDown && (vk == VkDown || vk == VkUp))
+                {
+                    var forward = vk == VkDown;
+                    _ = Dispatcher.BeginInvoke(() => ScrollCyberNewsPage(forward), DispatcherPriority.Send);
+                    return true;
+                }
+                if (vk == VkSpace)
+                {
+                    var forward = !shiftDown; // 空格下翻，Shift+空格上翻
+                    _ = Dispatcher.BeginInvoke(() => ScrollCyberNewsPage(forward), DispatcherPriority.Send);
+                    return true;
+                }
+            }
         }
 
-        if (!altDown || ctrlDown || shiftDown) return false;
+        // Alt+1..5：优先 RegisterHotKey（展开时）；未注册时钩子兜底
+        if (!altDown || ctrlDown || shiftDown || _tabHotkeysRegistered) return false;
         var digit = vk switch
         {
             0x31 or 0x61 => 1,
@@ -723,16 +957,32 @@ public partial class MainWindow : Window
         _lastEscTapUtc = now;
     }
 
+    private void OnShiftTap()
+    {
+        var now = DateTime.UtcNow;
+        if (_lastShiftTapUtc != DateTime.MinValue
+            && now - _lastShiftTapUtc <= DoubleEscWindow)
+        {
+            _lastShiftTapUtc = DateTime.MinValue;
+            Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+            return;
+        }
+        _lastShiftTapUtc = now;
+    }
+
     private void UpdateTrayHotkeyTip()
     {
         if (_tray == null) return;
         var parts = new List<string> { "方老师的工作区" };
-        if (_keyboardHookInstalled) parts.Add("连按两下 Esc");
-        if (_agentHotkeyRegistered) parts.Add("Alt+Space 大模型");
+        if (_keyboardHookInstalled)
+        {
+            parts.Add("连按两下 Esc");
+            parts.Add("连按两下 Shift 大模型");
+        }
         _tray.Text = string.Join(" · ", parts);
     }
 
-    /// <summary>全局热键 Alt+Space：展开侧栏并切到大模型输入框。</summary>
+    /// <summary>全局：连按两下 Shift，展开侧栏并切到大模型输入框。</summary>
     private void FocusAgentInputFromHotkey()
     {
         if (!_expanded) ExpandFromTray();
@@ -746,13 +996,8 @@ public partial class MainWindow : Window
 
     private void UnregisterWakeHotkey()
     {
+        UnregisterTabHotkeys();
         UninstallKeyboardHook();
-        var hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd != IntPtr.Zero && _agentHotkeyRegistered)
-        {
-            UnregisterHotKey(hwnd, HotkeyIdAgent);
-            _agentHotkeyRegistered = false;
-        }
         if (_hwndSource != null)
         {
             _hwndSource.RemoveHook(WndProc);
@@ -762,10 +1007,23 @@ public partial class MainWindow : Window
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if ((uint)msg == WmHotkey && wParam.ToInt32() == HotkeyIdAgent)
+        if ((uint)msg != WmHotkey) return IntPtr.Zero;
+        var id = wParam.ToInt32();
+        if (id is >= HotkeyIdTabBase + 1 and <= HotkeyIdTabBase + 5)
         {
             handled = true;
-            Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+            var digit = id - HotkeyIdTabBase;
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (!_expanded) ExpandFromTray();
+                else
+                {
+                    Activate();
+                    Topmost = true;
+                }
+                TrySwitchTabByNumber(digit);
+                ScheduleShellFocusReclaim();
+            });
         }
         return IntPtr.Zero;
     }
@@ -773,6 +1031,7 @@ public partial class MainWindow : Window
     private void Collapse()
     {
         FlushNoteSave();
+        UnregisterTabHotkeys();
         _expanded = false;
         _pinned = false;
         _escDismissArmed = false;
@@ -781,6 +1040,36 @@ public partial class MainWindow : Window
         _leaveSince = null;
         _awaitPanelEnter = false;
         PlaceCollapsed();
+    }
+
+    /// <summary>仅在侧栏展开且前台时注册，避免全局抢走其它程序的 Alt+数字。</summary>
+    private void RegisterTabHotkeys()
+    {
+        if (_tabHotkeysRegistered || !_expanded) return;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        var ok = true;
+        for (var i = 1; i <= 5; i++)
+        {
+            var id = HotkeyIdTabBase + i;
+            var vk = (uint)(0x30 + i); // '1'..'5'
+            if (!RegisterHotKey(hwnd, id, ModAlt | ModNoRepeat, vk)
+                && !RegisterHotKey(hwnd, id, ModAlt, vk))
+                ok = false;
+        }
+        _tabHotkeysRegistered = ok;
+    }
+
+    private void UnregisterTabHotkeys()
+    {
+        if (!_tabHotkeysRegistered) return;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            for (var i = 1; i <= 5; i++)
+                UnregisterHotKey(hwnd, HotkeyIdTabBase + i);
+        }
+        _tabHotkeysRegistered = false;
     }
 
     private void BtnPin_Click(object sender, RoutedEventArgs e)
@@ -971,15 +1260,38 @@ public partial class MainWindow : Window
             }
         }
 
-        // 网安热点：↓ → 第一条/下一条（与钩子一致，不依赖 _inputFocused）
+        // 网安：→ 下一条，← 刷新；详情 ↓/空格 下翻，↑/Shift+空格 上翻（与钩子一致）
         if (_tab == TabMode.Cyber
-            && key == Key.Down
-            && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Shift))
-               == ModifierKeys.None)
+            && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) == ModifierKeys.None)
         {
-            OpenCyberNewsNext();
-            e.Handled = true;
-            return;
+            var shift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+            if (!shift && key == Key.Right)
+            {
+                OpenCyberNewsNext();
+                e.Handled = true;
+                return;
+            }
+            if (!shift && key == Key.Left)
+            {
+                RefreshCyberNewsFromHotkey();
+                e.Handled = true;
+                return;
+            }
+            if (_cyberNewsOpen != null)
+            {
+                if (!shift && (key == Key.Down || key == Key.Up))
+                {
+                    ScrollCyberNewsPage(forward: key == Key.Down);
+                    e.Handled = true;
+                    return;
+                }
+                if (key == Key.Space)
+                {
+                    ScrollCyberNewsPage(forward: !shift);
+                    e.Handled = true;
+                    return;
+                }
+            }
         }
 
         // 邮件阅读：Ctrl+D → 标记垃圾并移出列表
@@ -1127,7 +1439,7 @@ public partial class MainWindow : Window
             menu.Items.Add(item);
         }
         AddItem("展开侧栏\t连按两下 Esc", (_, _) => Dispatcher.Invoke(ExpandFromTray));
-        AddItem("大模型输入\tAlt+Space", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
+        AddItem("大模型输入\t连按两下 Shift", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
         AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
         AddItem("登录并同步", async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
@@ -1421,6 +1733,10 @@ public partial class MainWindow : Window
         int start = (int)first.DayOfWeek; // 周日为一周起点
         int days = DateTime.DaysInMonth(_year, _month);
         int cells = (int)Math.Ceiling((start + days) / 7.0) * 7;
+        // 按周数定高（每格 36），避免 DockPanel 填满时把末行挤没/裁切
+        var rows = Math.Max(5, cells / 7);
+        DayGrid.Height = rows * 36;
+        DayGrid.MinHeight = rows * 36;
         var today = DateTime.Today;
         var accent = (MediaBrush)FindResource("Accent");
         var accentSoft = (MediaBrush)FindResource("AccentSoft");
@@ -1514,6 +1830,7 @@ public partial class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
             };
 
+            // 按钮拉满格子，圆点仍居中，与「日一二…」列对齐、铺满卡片宽
             var btn = new WpfButton
             {
                 Margin = new Thickness(0),
@@ -1523,6 +1840,8 @@ public partial class MainWindow : Window
                 Cursor = WpfCursors.Hand,
                 Template = bareBtn,
                 Content = dayChrome,
+                HorizontalAlignment = WpfHorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
                 HorizontalContentAlignment = WpfHorizontalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
             };
@@ -1656,6 +1975,7 @@ public partial class MainWindow : Window
         }
 
         await ShowCyberHotFromCacheThenMaybeFetchAsync();
+        TryOpenFirstCyberNewsIfEmpty();
     }
 
     private async Task EnterAgentTabAsync()
@@ -2000,7 +2320,7 @@ public partial class MainWindow : Window
     private void UpdateMailBadges(int unread)
     {
         _mailUnread = Math.Max(0, unread);
-        var text = _mailUnread > 99 ? "99+" : _mailUnread.ToString();
+        var text = _mailUnread.ToString();
         var show = _mailUnread > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         MailTabBadgeText.Text = text;
@@ -2313,12 +2633,27 @@ public partial class MainWindow : Window
 
     private static void OpenExternalUrl(string? uri)
     {
-        if (string.IsNullOrWhiteSpace(uri)) return;
+        if (!IsSafeExternalUri(uri)) return;
         try
         {
             Process.Start(new ProcessStartInfo { FileName = uri, UseShellExecute = true });
         }
         catch { /* 系统打不开就算了 */ }
+    }
+
+    /// <summary>仅允许 http/https/mailto，拒绝 file: 与自定义协议进 ShellExecute。</summary>
+    private static bool IsSafeExternalUri(string? uri)
+    {
+        if (string.IsNullOrWhiteSpace(uri)) return false;
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var u)) return false;
+        return u.Scheme is "http" or "https" or "mailto";
+    }
+
+    private static bool IsHttpOrHttps(string? uri)
+    {
+        if (string.IsNullOrWhiteSpace(uri)) return false;
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var u)) return false;
+        return u.Scheme is "http" or "https";
     }
 
     private static string WrapMailHtml(string bodyHtml)
@@ -2504,16 +2839,22 @@ public partial class MainWindow : Window
         CyberModeFavText.FontWeight = hot ? FontWeights.Normal : FontWeights.SemiBold;
     }
 
-    private void CyberModeHot_Click(object sender, MouseButtonEventArgs e)
+    private async void CyberModeHot_Click(object sender, MouseButtonEventArgs e)
     {
         _cyberListMode = CyberListMode.Hot;
         StyleCyberModeTabs();
         HideCyberNewsDetail();
-        _ = ShowCyberHotFromCacheThenMaybeFetchAsync();
+        await ShowCyberHotFromCacheThenMaybeFetchAsync();
+        TryOpenFirstCyberNewsIfEmpty();
     }
 
-    private void BtnCyberNewsRefresh_Click(object sender, RoutedEventArgs e)
+    private void BtnCyberNewsRefresh_Click(object sender, RoutedEventArgs e) =>
+        RefreshCyberNewsFromHotkey();
+
+    /// <summary>← / 刷新按钮：热点强制拉取；收藏只重画列表。</summary>
+    private void RefreshCyberNewsFromHotkey()
     {
+        if (_tab != TabMode.Cyber) return;
         if (_cyberListMode == CyberListMode.Fav)
         {
             ShowCyberFavList();
@@ -2556,14 +2897,23 @@ public partial class MainWindow : Window
     }
 
     /// <summary>先画本地收件箱；无缓存或已到间隔再联网。</summary>
-    private Task ShowCyberHotFromCacheThenMaybeFetchAsync()
+    private async Task ShowCyberHotFromCacheThenMaybeFetchAsync()
     {
         var cached = _cyberNews.CachedUnread;
         ShowCyberHotList(cached);
         UpdateCyberBadge();
         if (cached.Count == 0 || _cyberNews.IsFetchDue)
-            return RefreshCyberNewsAsync(force: cached.Count == 0);
-        return Task.CompletedTask;
+            await RefreshCyberNewsAsync(force: cached.Count == 0);
+    }
+
+    /// <summary>热点页无详情时，自动打开第一条并从列表去掉。</summary>
+    private void TryOpenFirstCyberNewsIfEmpty()
+    {
+        if (_tab != TabMode.Cyber || _cyberListMode != CyberListMode.Hot) return;
+        if (_cyberNewsOpen != null) return;
+        var unread = _cyberNews.CachedUnread;
+        if (unread.Count == 0) return;
+        OpenCyberNewsDetail(unread[0], dismissFromHot: true);
     }
 
     private async Task PollCyberNewsAsync(bool silent)
@@ -2586,7 +2936,7 @@ public partial class MainWindow : Window
     private void UpdateCyberBadge()
     {
         var n = _cyberNews.UnreadCount;
-        var text = n > 99 ? "99+" : n.ToString();
+        var text = n.ToString();
         CyberTabBadgeText.Text = text;
         CyberTabBadge.Visibility = n > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (_tab == TabMode.Cyber && _cyberListMode == CyberListMode.Hot)
@@ -2604,6 +2954,9 @@ public partial class MainWindow : Window
             UpdateCyberBadge();
             if (_cyberListMode != CyberListMode.Hot) return;
             ShowCyberHotList(items);
+            // 进页/刷新后若还没打开详情，默认看第一条
+            if (_tab == TabMode.Cyber)
+                TryOpenFirstCyberNewsIfEmpty();
         }
         catch
         {
@@ -2704,17 +3057,26 @@ public partial class MainWindow : Window
             RenderCyberNewsList(_cyberNews.CachedUnread, fromHot: true);
         }
 
+        var wasEmpty = _cyberNewsOpen == null;
         _cyberNewsOpen = item;
         var when = item.Published?.ToLocalTime().ToString("MM-dd HH:mm");
         CyberNewsDetailSource.Text = string.IsNullOrEmpty(when)
             ? $"{item.Source} · {item.Title}"
             : $"{item.Source} · {when} · {item.Title}";
         BtnCyberNewsFav.Visibility = Visibility.Visible;
+        BtnCyberNewsWeixin.Visibility = Visibility.Visible;
+        BtnCyberNewsWeixin.Content = "分享";
         UpdateCyberFavButton();
         await NavigateCyberWebAsync(item.Link);
-        ScheduleShellFocusReclaim(
-            activate: true,
-            when: () => _expanded && _tab == TabMode.Cyber);
+        // 当前页展示时后台预载下一条，加快 → 切换
+        PrefetchNextCyberNews();
+        // 仅首次打开详情时 Activate；连切新闻时抢焦点会让 WebView 停在旧页
+        if (wasEmpty)
+        {
+            ScheduleShellFocusReclaim(
+                activate: true,
+                when: () => _expanded && _tab == TabMode.Cyber);
+        }
     }
 
     private void UpdateCyberFavButton()
@@ -2727,21 +3089,127 @@ public partial class MainWindow : Window
     private void HideCyberNewsDetail()
     {
         _cyberNewsOpen = null;
-        CyberNewsDetailSource.Text = "点左侧列表，或按 ↓ 打开第一条";
+        _cyberWebTargetUrl = null;
+        _cyberPrefetchUrl = null;
+        _cyberPrefetchReady = false;
+        _cyberWebNavEpoch++;
+        _cyberPrefetchEpoch++;
+        try { _cyberNavCts?.Cancel(); } catch { /* ignore */ }
+        CyberNewsDetailSource.Text = "→ 下一条 · ← 刷新 · ↓/空格下翻 · ↑/Shift+空格上翻";
         BtnCyberNewsFav.Content = "收藏";
         BtnCyberNewsFav.Visibility = Visibility.Collapsed;
-        CyberNewsWebHint.Text = "按 ↓ 打开第一条";
+        BtnCyberNewsWeixin.Content = "分享";
+        BtnCyberNewsWeixin.Visibility = Visibility.Collapsed;
+        CyberNewsWebHint.Text = "→ 下一条 · ← 刷新 · ↓/空格下翻 · ↑上翻";
         CyberNewsWebHint.Visibility = Visibility.Visible;
         CyberNewsWeb.Visibility = Visibility.Collapsed;
+        CyberNewsWebPrefetch.Visibility = Visibility.Collapsed;
+        BlankCyberWeb(CyberNewsWeb);
+        BlankCyberWeb(CyberNewsWebPrefetch);
+    }
+
+    private static void BlankCyberWeb(Microsoft.Web.WebView2.Wpf.WebView2 web)
+    {
         try
         {
-            if (_cyberWebReady && CyberNewsWeb.CoreWebView2 != null)
-                CyberNewsWeb.CoreWebView2.Navigate("about:blank");
+            if (web.CoreWebView2 == null) return;
+            web.CoreWebView2.Stop();
+            web.CoreWebView2.Navigate("about:blank");
         }
         catch { /* ignore */ }
     }
 
     private void BtnCyberNewsNext_Click(object sender, RoutedEventArgs e) => OpenCyberNewsNext();
+
+    private Microsoft.Web.WebView2.Wpf.WebView2 CyberActiveWeb =>
+        _cyberWebFlipped ? CyberNewsWebPrefetch : CyberNewsWeb;
+
+    private Microsoft.Web.WebView2.Wpf.WebView2 CyberPrefetchWeb =>
+        _cyberWebFlipped ? CyberNewsWeb : CyberNewsWebPrefetch;
+
+    /// <summary>详情页翻页：↓/空格 下翻，↑/Shift+空格 上翻（一步 ≈ 滚轮一格）。</summary>
+    private void ScrollCyberNewsPage(bool forward)
+    {
+        if (_tab != TabMode.Cyber || _cyberNewsOpen == null) return;
+        var web = CyberActiveWeb;
+        if (web.CoreWebView2 == null || web.Visibility != Visibility.Visible) return;
+
+        // 与滚轮一格一致：Chromium 常见 deltaY≈100；并尊重系统「一次滚动行数」
+        var now = DateTime.UtcNow;
+        if (now - _cyberScrollAtUtc < TimeSpan.FromMilliseconds(80)) return;
+        _cyberScrollAtUtc = now;
+
+        var sign = forward ? 1 : -1;
+        _ = web.CoreWebView2.ExecuteScriptAsync(
+            "(function(){"
+            + "var el=document.scrollingElement||document.documentElement||document.body;"
+            + "if(!el)return;"
+            + "var line=parseFloat(getComputedStyle(el).lineHeight);"
+            + "if(!line||isNaN(line))line=16;"
+            + "var lines=3;" // Windows 默认一次 3 行；与滚轮一格接近
+            + "var step=Math.round(line*lines)*" + sign + ";"
+            + "el.scrollBy(0,step);"
+            + "})()");
+    }
+
+    /// <summary>当前列表里「下一条」候选（热点=未读头；收藏=下一项）。</summary>
+    private CyberNewsItem? PeekNextCyberNews()
+    {
+        if (_cyberListMode == CyberListMode.Hot)
+            return _cyberNews.CachedUnread.Count > 0 ? _cyberNews.CachedUnread[0] : null;
+
+        var favs = _cyberNews.Favorites;
+        if (favs.Count == 0) return null;
+        if (_cyberNewsOpen == null) return favs[0];
+        for (var i = 0; i < favs.Count - 1; i++)
+        {
+            if (string.Equals(favs[i].Id, _cyberNewsOpen.Id, StringComparison.OrdinalIgnoreCase))
+                return favs[i + 1];
+        }
+        return null;
+    }
+
+    /// <summary>后台 WebView 预载下一条链接（始终 Collapsed）。</summary>
+    private async void PrefetchNextCyberNews()
+    {
+        var next = PeekNextCyberNews();
+        var link = next?.Link?.Trim();
+        if (!IsHttpOrHttps(link))
+        {
+            _cyberPrefetchUrl = null;
+            _cyberPrefetchReady = false;
+            BlankCyberWeb(CyberPrefetchWeb);
+            return;
+        }
+
+        var safeLink = link!;
+        if (!string.IsNullOrEmpty(_cyberPrefetchUrl)
+            && UrlsLooselyMatch(_cyberPrefetchUrl, safeLink)
+            && _cyberPrefetchReady)
+            return;
+
+        var epoch = ++_cyberPrefetchEpoch;
+        _cyberPrefetchUrl = safeLink;
+        _cyberPrefetchReady = false;
+
+        try
+        {
+            await EnsureCyberWebAsync();
+            if (epoch != _cyberPrefetchEpoch) return;
+            var web = CyberPrefetchWeb;
+            if (web.CoreWebView2 == null) return;
+            web.Visibility = Visibility.Collapsed;
+            try { web.CoreWebView2.Stop(); } catch { /* ignore */ }
+            var cur = web.CoreWebView2.Source ?? "";
+            if (UrlsLooselyMatch(cur, safeLink))
+            {
+                _cyberPrefetchReady = true;
+                return;
+            }
+            web.CoreWebView2.Navigate(safeLink);
+        }
+        catch { /* ignore */ }
+    }
 
     /// <summary>无详情 → 列表第一条；已有详情 → 下一条。</summary>
     private void OpenCyberNewsNext()
@@ -2802,62 +3270,210 @@ public partial class MainWindow : Window
 
     private async Task EnsureCyberWebAsync()
     {
-        if (_cyberWebReady && CyberNewsWeb.CoreWebView2 != null) return;
+        await EnsureOneCyberWebAsync(CyberNewsWeb, isPrefetch: false);
+        await EnsureOneCyberWebAsync(CyberNewsWebPrefetch, isPrefetch: true);
+    }
+
+    private async Task EnsureOneCyberWebAsync(Microsoft.Web.WebView2.Wpf.WebView2 web, bool isPrefetch)
+    {
+        if (isPrefetch)
+        {
+            if (_cyberPrefetchWebReady && web.CoreWebView2 != null) return;
+        }
+        else if (_cyberWebReady && web.CoreWebView2 != null) return;
+
         try
         {
-            await CyberNewsWeb.EnsureCoreWebView2Async();
-            if (CyberNewsWeb.CoreWebView2 == null) return;
-            var settings = CyberNewsWeb.CoreWebView2.Settings;
-            settings.AreDefaultContextMenusEnabled = true;
+            await web.EnsureCoreWebView2Async();
+            if (web.CoreWebView2 == null) return;
+            var settings = web.CoreWebView2.Settings;
+            settings.AreDefaultContextMenusEnabled = !isPrefetch;
             settings.IsStatusBarEnabled = false;
             settings.AreDevToolsEnabled = false;
-            CyberNewsWeb.CoreWebView2.NewWindowRequested += (_, e) =>
+            settings.IsZoomControlEnabled = !isPrefetch;
+            web.ZoomFactor = 1.0;
+            web.CoreWebView2.NewWindowRequested += (_, e) =>
             {
                 e.Handled = true;
-                try
-                {
-                    Process.Start(new ProcessStartInfo { FileName = e.Uri, UseShellExecute = true });
-                }
-                catch { /* ignore */ }
+                if (IsHttpOrHttps(e.Uri))
+                    OpenExternalUrl(e.Uri);
             };
-            if (!_cyberWebNavHooked)
+
+            var hooked = isPrefetch ? _cyberPrefetchNavHooked : _cyberWebNavHooked;
+            if (!hooked)
             {
-                _cyberWebNavHooked = true;
-                // 清除可能残留的虚拟视口覆盖
+                if (isPrefetch) _cyberPrefetchNavHooked = true;
+                else _cyberWebNavHooked = true;
+                web.CoreWebView2.NavigationCompleted += CyberWeb_NavigationCompleted;
+                _ = web.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+                    """
+                    document.documentElement.style.overflowX='hidden';
+                    document.documentElement.style.maxWidth='100%';
+                    if(document.body){
+                      document.body.style.overflowX='hidden';
+                      document.body.style.maxWidth='100%';
+                    }
+                    """);
                 try
                 {
-                    await CyberNewsWeb.CoreWebView2.CallDevToolsProtocolMethodAsync(
+                    await web.CoreWebView2.CallDevToolsProtocolMethodAsync(
                         "Emulation.clearDeviceMetricsOverride", "{}");
                 }
                 catch { /* ignore */ }
             }
-            _cyberWebReady = true;
+
+            if (isPrefetch) _cyberPrefetchWebReady = true;
+            else _cyberWebReady = true;
         }
         catch
         {
-            _cyberWebReady = false;
+            if (isPrefetch) _cyberPrefetchWebReady = false;
+            else _cyberWebReady = false;
+        }
+    }
+
+    private void CyberWeb_NavigationCompleted(
+        object? sender,
+        Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
+    {
+        try
+        {
+            // 预载完成：只记就绪，不改 UI
+            if (ReferenceEquals(sender, CyberPrefetchWeb.CoreWebView2))
+            {
+                if (e.IsSuccess
+                    && !string.IsNullOrEmpty(_cyberPrefetchUrl)
+                    && UrlsLooselyMatch(CyberPrefetchWeb.CoreWebView2?.Source ?? "", _cyberPrefetchUrl))
+                    _cyberPrefetchReady = true;
+                return;
+            }
+
+            if (!ReferenceEquals(sender, CyberActiveWeb.CoreWebView2)) return;
+            if (_tab != TabMode.Cyber || _cyberNewsOpen == null) return;
+            var src = CyberActiveWeb.CoreWebView2?.Source;
+            if (string.IsNullOrEmpty(src) || src.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!string.IsNullOrEmpty(_cyberWebTargetUrl)
+                && !UrlsLooselyMatch(src, _cyberWebTargetUrl))
+                return;
+
+            if (e.IsSuccess)
+            {
+                CyberNewsWebHint.Visibility = Visibility.Collapsed;
+                CyberActiveWeb.Visibility = Visibility.Visible;
+                CyberPrefetchWeb.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                CyberNewsWebHint.Text = "页面加载失败，可点「浏览器」打开";
+                CyberNewsWebHint.Visibility = Visibility.Visible;
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    private static bool UrlsLooselyMatch(string a, string b)
+    {
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return true;
+        try
+        {
+            var ua = new Uri(a);
+            var ub = new Uri(b);
+            return string.Equals(ua.GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                       ub.GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                       StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
     private async Task NavigateCyberWebAsync(string? url)
     {
-        if (string.IsNullOrWhiteSpace(url)) return;
+        if (!IsHttpOrHttps(url))
+        {
+            CyberNewsWebHint.Text = "无有效链接，可点「浏览器」或换下一条";
+            CyberNewsWebHint.Visibility = Visibility.Visible;
+            return;
+        }
+
+        // 连按切换：合并到最后一条
+        _cyberNavCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _cyberNavCts = cts;
+        var epoch = ++_cyberWebNavEpoch;
+        var target = url!.Trim();
+        _cyberWebTargetUrl = target;
+
+        try
+        {
+            await Task.Delay(50, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (epoch != _cyberWebNavEpoch) return;
+
         await EnsureCyberWebAsync();
-        if (!_cyberWebReady || CyberNewsWeb.CoreWebView2 == null)
+        if (epoch != _cyberWebNavEpoch) return;
+
+        // 预载命中：对调前后台 WebView，免重新 Navigate
+        if (!string.IsNullOrEmpty(_cyberPrefetchUrl)
+            && UrlsLooselyMatch(_cyberPrefetchUrl, target)
+            && CyberPrefetchWeb.CoreWebView2 != null)
+        {
+            _cyberWebFlipped = !_cyberWebFlipped;
+            _cyberPrefetchUrl = null;
+            _cyberPrefetchReady = false;
+            CyberPrefetchWeb.Visibility = Visibility.Collapsed;
+            CyberActiveWeb.Visibility = Visibility.Visible;
+            CyberActiveWeb.ZoomFactor = 1.0;
+
+            var src = CyberActiveWeb.CoreWebView2?.Source ?? "";
+            if (UrlsLooselyMatch(src, target)
+                && !src.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
+            {
+                CyberNewsWebHint.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                CyberNewsWebHint.Text = "加载中…";
+                CyberNewsWebHint.Visibility = Visibility.Visible;
+            }
+            return;
+        }
+
+        var active = CyberActiveWeb;
+        if (active.CoreWebView2 == null)
         {
             CyberNewsWebHint.Text = "WebView 不可用，请点「浏览器」打开";
             CyberNewsWebHint.Visibility = Visibility.Visible;
-            CyberNewsWeb.Visibility = Visibility.Collapsed;
+            active.Visibility = Visibility.Collapsed;
             return;
         }
-        CyberNewsWebHint.Visibility = Visibility.Collapsed;
-        CyberNewsWeb.Visibility = Visibility.Visible;
+
+        CyberNewsWebHint.Text = "加载中…";
+        CyberNewsWebHint.Visibility = Visibility.Visible;
+        active.Visibility = Visibility.Visible;
+        CyberPrefetchWeb.Visibility = Visibility.Collapsed;
         try
         {
-            CyberNewsWeb.CoreWebView2.Navigate(url);
+            var core = active.CoreWebView2;
+            active.ZoomFactor = 1.0;
+            try { core.Stop(); } catch { /* ignore */ }
+
+            var cur = core.Source ?? "";
+            if (UrlsLooselyMatch(cur, target))
+                core.Reload();
+            else
+                core.Navigate(target);
         }
         catch
         {
+            if (epoch != _cyberWebNavEpoch) return;
             CyberNewsWebHint.Text = "页面加载失败，可点「浏览器」打开";
             CyberNewsWebHint.Visibility = Visibility.Visible;
         }
@@ -2866,10 +3482,64 @@ public partial class MainWindow : Window
     private void BtnCyberNewsOpen_Click(object sender, RoutedEventArgs e)
     {
         var link = _cyberNewsOpen?.Link;
-        if (string.IsNullOrWhiteSpace(link)) return;
+        if (!IsHttpOrHttps(link)) return;
+        OpenExternalUrl(link);
+    }
+
+    /// <summary>
+    /// 分享到微信：先复制标题+链接，再发 Ctrl+Alt+W（微信唤醒热键），会话里粘贴即可。
+    /// </summary>
+    private void BtnCyberNewsWeixin_Click(object sender, RoutedEventArgs e)
+    {
+        var item = _cyberNewsOpen;
+        if (item == null) return;
+        var link = (item.Link ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(link))
+        {
+            BtnCyberNewsWeixin.Content = "无链接";
+            return;
+        }
+
+        var text = string.IsNullOrWhiteSpace(item.Source)
+            ? $"{item.Title}\n{link}"
+            : $"【{item.Source}】{item.Title}\n{link}";
         try
         {
-            Process.Start(new ProcessStartInfo { FileName = link, UseShellExecute = true });
+            System.Windows.Clipboard.SetText(text);
+        }
+        catch
+        {
+            BtnCyberNewsWeixin.Content = "复制失败";
+            return;
+        }
+
+        // 稍后再发热键，避免本窗还占着键盘焦点时被吃掉
+        _ = Dispatcher.BeginInvoke(() =>
+        {
+            SendCtrlAltW();
+            BtnCyberNewsWeixin.Content = "已复制";
+            var reset = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            reset.Tick += (_, _) =>
+            {
+                reset.Stop();
+                if (BtnCyberNewsWeixin.Visibility == Visibility.Visible)
+                    BtnCyberNewsWeixin.Content = "分享";
+            };
+            reset.Start();
+        }, DispatcherPriority.ApplicationIdle);
+    }
+
+    /// <summary>模拟 Ctrl+Alt+W，走微信桌面端已登记的唤醒快捷键。</summary>
+    private static void SendCtrlAltW()
+    {
+        try
+        {
+            keybd_event((byte)VkControl, 0, 0, UIntPtr.Zero);
+            keybd_event((byte)VkMenu, 0, 0, UIntPtr.Zero);
+            keybd_event(VkW, 0, 0, UIntPtr.Zero);
+            keybd_event(VkW, 0, KeyeventfKeyup, UIntPtr.Zero);
+            keybd_event((byte)VkMenu, 0, KeyeventfKeyup, UIntPtr.Zero);
+            keybd_event((byte)VkControl, 0, KeyeventfKeyup, UIntPtr.Zero);
         }
         catch { /* ignore */ }
     }
@@ -3262,6 +3932,7 @@ public partial class MainWindow : Window
 
     private void ReloadTodos()
     {
+        CancelTodoDrag();
         TodoList.Children.Clear();
         UpdateTodoSectionHeader();
         var day = _selected.ToString("yyyy-MM-dd");
@@ -3320,9 +3991,30 @@ public partial class MainWindow : Window
             BorderBrush = line,
             BorderThickness = new Thickness(0, 0, 0, 1),
             Padding = new Thickness(10, 10, 8, 10),
+            Tag = todo,
+            Cursor = todo.Done ? WpfCursors.Arrow : WpfCursors.SizeAll,
+            ToolTip = todo.Done ? null : "拖拽调整顺序",
         };
-        row.MouseEnter += (_, _) => row.Background = hover;
-        row.MouseLeave += (_, _) => row.Background = MediaBrushes.Transparent;
+        row.MouseEnter += (_, _) =>
+        {
+            if (!_todoDragging) row.Background = hover;
+        };
+        row.MouseLeave += (_, _) =>
+        {
+            if (!_todoDragging || !ReferenceEquals(row, _todoDragRow))
+                row.Background = MediaBrushes.Transparent;
+        };
+        if (!todo.Done)
+        {
+            row.PreviewMouseLeftButtonDown += TodoRow_PreviewMouseLeftButtonDown;
+            row.PreviewMouseMove += TodoRow_PreviewMouseMove;
+            row.PreviewMouseLeftButtonUp += TodoRow_PreviewMouseLeftButtonUp;
+            row.LostMouseCapture += (_, _) =>
+            {
+                if (_todoDragging) FinishTodoDrag();
+                else CancelTodoDrag();
+            };
+        }
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -3340,7 +4032,7 @@ public partial class MainWindow : Window
             BorderBrush = todo.Done ? accent : new SolidColorBrush(MediaColor.FromArgb(0x70, 0, 0, 0)),
             Background = todo.Done ? accent : MediaBrushes.Transparent,
             Cursor = WpfCursors.Hand,
-            Tag = todo.Id,
+            Tag = "nodrag:" + todo.Id,
             VerticalAlignment = VerticalAlignment.Center,
             Child = todo.Done
                 ? new TextBlock
@@ -3358,7 +4050,8 @@ public partial class MainWindow : Window
         check.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            _store.ToggleTodo((string)check.Tag);
+            if (_todoDragging) return;
+            _store.ToggleTodo(todo.Id);
             RebuildCalendar();
             ReloadTodos();
             _ = TrySyncSilentAsync();
@@ -3379,12 +4072,13 @@ public partial class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Foreground = todo.Done ? muted : fg,
             TextDecorations = todo.Done ? TextDecorations.Strikethrough : null,
-            Cursor = WpfCursors.Hand,
-            ToolTip = "单击编辑",
+            Cursor = todo.Done ? WpfCursors.Hand : WpfCursors.SizeAll,
+            ToolTip = todo.Done ? "单击编辑" : "拖拽排序 · 单击编辑",
         };
         title.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
+            if (_todoDragging || _todoDragSuppressClick) return;
             BeginInlineTodoEdit(todo, titleHost, title);
         };
         titleHost.Children.Add(title);
@@ -3395,6 +4089,7 @@ public partial class MainWindow : Window
         {
             Orientation = System.Windows.Controls.Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
+            Tag = "nodrag",
         };
         var edit = new TextBlock
         {
@@ -3405,10 +4100,12 @@ public partial class MainWindow : Window
             Padding = new Thickness(6, 0, 4, 0),
             VerticalAlignment = VerticalAlignment.Center,
             ToolTip = "编辑标题与备注",
+            Tag = "nodrag",
         };
         edit.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
+            if (_todoDragging) return;
             OpenTodoInNotes(todo.Id);
         };
         var del = new TextBlock
@@ -3420,13 +4117,14 @@ public partial class MainWindow : Window
             Cursor = WpfCursors.Hand,
             Padding = new Thickness(4, 0, 2, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            Tag = todo.Id,
+            Tag = "nodrag:" + todo.Id,
             ToolTip = "删除",
         };
         del.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            _store.DeleteTodo((string)del.Tag);
+            if (_todoDragging) return;
+            _store.DeleteTodo(todo.Id);
             RebuildCalendar();
             ReloadTodos();
             _ = TrySyncSilentAsync();
@@ -3465,6 +4163,223 @@ public partial class MainWindow : Window
 
         row.Child = grid;
         return row;
+    }
+
+    private static bool IsTodoNoDragSource(DependencyObject? src, DependencyObject row)
+    {
+        while (src != null && !ReferenceEquals(src, row))
+        {
+            if (src is FrameworkElement fe)
+            {
+                var tag = fe.Tag as string;
+                if (tag != null && tag.StartsWith("nodrag", StringComparison.Ordinal))
+                    return true;
+            }
+            src = VisualTreeHelper.GetParent(src)
+                  ?? (src is FrameworkElement f ? f.Parent as DependencyObject : null);
+        }
+        return false;
+    }
+
+    private void TodoRow_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Border row || row.Tag is not TodoItem todo || todo.Done) return;
+        if (IsTodoNoDragSource(e.OriginalSource as DependencyObject, row)) return;
+        _todoDragId = todo.Id;
+        _todoDragStart = e.GetPosition(TodoList);
+        _todoDragging = false;
+        _todoDragSuppressClick = false;
+        _todoDragRow = row;
+        _todoInsertIndex = -1;
+        row.CaptureMouse();
+    }
+
+    private void TodoRow_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_todoDragId == null || e.LeftButton != MouseButtonState.Pressed) return;
+        if (sender is not Border row || !ReferenceEquals(row, _todoDragRow)) return;
+
+        var pos = e.GetPosition(TodoList);
+        if (!_todoDragging)
+        {
+            if (Math.Abs(pos.Y - _todoDragStart.Y) < TodoDragThreshold
+                && Math.Abs(pos.X - _todoDragStart.X) < TodoDragThreshold)
+                return;
+            _todoDragging = true;
+            _todoDragSuppressClick = true;
+            row.Opacity = 0.55;
+            row.Background = (MediaBrush)FindResource("AccentSoft");
+            EnsureTodoInsertLine();
+        }
+
+        UpdateTodoInsertIndicator(pos.Y);
+    }
+
+    private void TodoRow_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_todoDragId == null) return;
+        if (_todoDragging) FinishTodoDrag();
+        else CancelTodoDrag();
+    }
+
+    private void EnsureTodoInsertLine()
+    {
+        if (_todoInsertLine != null) return;
+        _todoInsertLine = new Border
+        {
+            Height = 2,
+            Margin = new Thickness(8, 0, 8, 0),
+            Background = (MediaBrush)FindResource("Accent"),
+            IsHitTestVisible = false,
+            CornerRadius = new CornerRadius(1),
+        };
+    }
+
+    private List<Border> GetTodoDragRows()
+    {
+        var rows = new List<Border>();
+        foreach (UIElement child in TodoList.Children)
+        {
+            if (child is Border b && b.Tag is TodoItem t && !t.Done
+                && !ReferenceEquals(b, _todoInsertLine))
+                rows.Add(b);
+        }
+        return rows;
+    }
+
+    private void UpdateTodoInsertIndicator(double yInList)
+    {
+        var rows = GetTodoDragRows();
+        if (rows.Count == 0 || _todoInsertLine == null) return;
+
+        // 插入下标：落在行上半 → 该行前；下半 → 该行后
+        var insert = rows.Count;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var top = r.TranslatePoint(new System.Windows.Point(0, 0), TodoList).Y;
+            var mid = top + r.ActualHeight / 2;
+            if (yInList < mid)
+            {
+                insert = i;
+                break;
+            }
+        }
+
+        // 拖的是自己：插在自己前后等价于不动
+        var from = rows.FindIndex(r => ReferenceEquals(r, _todoDragRow));
+        if (from >= 0 && (insert == from || insert == from + 1))
+        {
+            _todoInsertIndex = from;
+            if (TodoList.Children.Contains(_todoInsertLine))
+                TodoList.Children.Remove(_todoInsertLine);
+            return;
+        }
+
+        _todoInsertIndex = insert;
+        if (TodoList.Children.Contains(_todoInsertLine))
+            TodoList.Children.Remove(_todoInsertLine);
+
+        // 插入线放在目标行之前；若目标是「末尾」则加在最后一条未完成行之后
+        var visualIndex = 0;
+        for (var i = 0; i < TodoList.Children.Count; i++)
+        {
+            if (ReferenceEquals(TodoList.Children[i], _todoInsertLine)) continue;
+            if (TodoList.Children[i] is not Border b || b.Tag is not TodoItem t || t.Done)
+                continue;
+            if (visualIndex == insert)
+            {
+                TodoList.Children.Insert(i, _todoInsertLine);
+                return;
+            }
+            visualIndex++;
+        }
+        TodoList.Children.Add(_todoInsertLine);
+    }
+
+    private void FinishTodoDrag()
+    {
+        var dragId = _todoDragId;
+        var insert = _todoInsertIndex;
+        var dragRow = _todoDragRow;
+        if (dragRow != null)
+        {
+            dragRow.Opacity = 1;
+            dragRow.Background = MediaBrushes.Transparent;
+            if (dragRow.IsMouseCaptured) dragRow.ReleaseMouseCapture();
+        }
+        if (_todoInsertLine != null && TodoList.Children.Contains(_todoInsertLine))
+            TodoList.Children.Remove(_todoInsertLine);
+
+        _todoDragId = null;
+        _todoDragging = false;
+        _todoDragRow = null;
+        _todoInsertIndex = -1;
+
+        if (string.IsNullOrEmpty(dragId) || insert < 0)
+        {
+            _todoDragSuppressClick = false;
+            return;
+        }
+
+        ApplyTodoReorder(dragId, insert);
+        _ = Dispatcher.BeginInvoke(() => { _todoDragSuppressClick = false; }, DispatcherPriority.Input);
+    }
+
+    private void CancelTodoDrag()
+    {
+        if (_todoDragRow != null)
+        {
+            _todoDragRow.Opacity = 1;
+            _todoDragRow.Background = MediaBrushes.Transparent;
+            if (_todoDragRow.IsMouseCaptured) _todoDragRow.ReleaseMouseCapture();
+        }
+        if (_todoInsertLine != null && TodoList.Children.Contains(_todoInsertLine))
+            TodoList.Children.Remove(_todoInsertLine);
+        _todoDragId = null;
+        _todoDragging = false;
+        _todoDragRow = null;
+        _todoInsertIndex = -1;
+        _todoDragSuppressClick = false;
+    }
+
+    /// <summary>
+    /// 把 dragId 挪到可见未完成列表的 insert 下标，再合并进全局未完成顺序并写库。
+    /// </summary>
+    private void ApplyTodoReorder(string dragId, int insertAmongVisible)
+    {
+        var day = _selected.ToString("yyyy-MM-dd");
+        var visible = _store.ListTodos(includeDone: false)
+            .Where(t => !_filterByDay || t.DueDate == day)
+            .Select(t => t.Id)
+            .ToList();
+        if (visible.Count == 0) return;
+
+        var from = visible.IndexOf(dragId);
+        if (from < 0) return;
+
+        // insert 是「含拖拽行」时的目标缝；先去掉自身再插入
+        var adjusted = insertAmongVisible;
+        if (adjusted > from) adjusted--;
+        adjusted = Math.Clamp(adjusted, 0, visible.Count - 1);
+
+        visible.RemoveAt(from);
+        visible.Insert(adjusted, dragId);
+
+        // 全局未完成：可见子集按新顺序填回原坑位
+        var global = _store.ListTodos(includeDone: false).Select(t => t.Id).ToList();
+        var visibleSet = visible.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var q = new Queue<string>(visible);
+        var merged = global
+            .Select(id => visibleSet.Contains(id) ? q.Dequeue() : id)
+            .ToList();
+        if (q.Count > 0) return; // 数据不一致则放弃
+
+        // 顺序未变则不写库
+        if (merged.SequenceEqual(global, StringComparer.OrdinalIgnoreCase)) return;
+
+        _store.ReorderTodos(merged);
+        ReloadTodos();
     }
 
     /// <summary>行内改标题：回车保存，Esc 取消。</summary>
