@@ -9,6 +9,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>DeskWidgets</RootNamespace>
     <AssemblyName>DeskWidgets</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <StartupObject>DeskWidgets.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>

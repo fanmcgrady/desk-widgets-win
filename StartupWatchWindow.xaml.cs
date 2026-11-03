@@ -1,7 +1,8 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Shapes;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using DeskWidgets.Services;
 
@@ -9,10 +10,11 @@ namespace DeskWidgets;
 
 public partial class StartupWatchWindow : Window
 {
-    private static readonly SolidColorBrush PendingBrush = Freeze(System.Windows.Media.Color.FromRgb(0x8A, 0x88, 0x86));
-    private static readonly SolidColorBrush ReadyBrush = Freeze(System.Windows.Media.Color.FromRgb(0x10, 0x7C, 0x10));
+    private static readonly SolidColorBrush PendingBrush = Freeze(System.Windows.Media.Color.FromRgb(0x8A, 0x8A, 0x8A));
+    private static readonly SolidColorBrush ReadyBrush = Freeze(System.Windows.Media.Color.FromRgb(0x00, 0xFF, 0x66));
+    private static readonly SolidColorBrush DimBrush = Freeze(System.Windows.Media.Color.FromRgb(0x1F, 0x8F, 0x45));
     private static readonly TimeSpan ItemTimeout = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan CloseAfterAllGreen = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CloseAfterAllGreen = TimeSpan.FromMilliseconds(800);
 
     private readonly Row[] _rows;
     private readonly DateTime _startedUtc = DateTime.UtcNow;
@@ -28,25 +30,9 @@ public partial class StartupWatchWindow : Window
             if (!preview && !StartupWatch.IsFreshBoot()) return;
             var items = StartupWatch.LoadEnabledOthers();
             if (items.Count == 0) return;
-            var window = new StartupWatchWindow(items);
-            if (preview)
-            {
-                window.WindowStartupLocation = WindowStartupLocation.Manual;
-                window.Loaded += (_, _) => PlaceBesideSidebar(window);
-            }
-            window.Show();
+            new StartupWatchWindow(items).Show();
         }
         catch { /* 读启动项失败时不挡侧栏 */ }
-    }
-
-    private static void PlaceBesideSidebar(Window window)
-    {
-        if (System.Windows.Application.Current?.MainWindow is not Window main || main == window) return;
-        window.WindowStartupLocation = WindowStartupLocation.Manual;
-        var width = window.ActualWidth > 1 ? window.ActualWidth : 320;
-        var area = SystemParameters.WorkArea;
-        window.Left = Math.Max(area.Left + 12, main.Left - width - 16);
-        window.Top = main.Top + 48;
     }
 
     public StartupWatchWindow(IReadOnlyList<StartupEntry> items)
@@ -55,7 +41,7 @@ public partial class StartupWatchWindow : Window
         _rows = new Row[items.Count];
         for (var i = 0; i < items.Count; i++)
         {
-            var row = MakeRow(items[i]);
+            var row = MakeRow(i + 1, items[i]);
             _rows[i] = row;
             Rows.Children.Add(row.Panel);
         }
@@ -63,11 +49,34 @@ public partial class StartupWatchWindow : Window
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _timer.Tick += (_, _) => Refresh();
+        PreviewKeyDown += OnPreviewKeyDown;
         Loaded += (_, _) =>
         {
+            PlaceOnPrimaryScreen();
             Refresh();
             _timer.Start();
+            Activate();
+            Focus();
         };
+    }
+
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        e.Handled = true;
+        BeginClose();
+    }
+
+    private void PlaceOnPrimaryScreen()
+    {
+        var screen = System.Windows.Forms.Screen.PrimaryScreen;
+        if (screen == null) return;
+        var bounds = screen.Bounds;
+        var dpi = VisualTreeHelper.GetDpi(this);
+        Left = bounds.Left / dpi.DpiScaleX;
+        Top = bounds.Top / dpi.DpiScaleY;
+        Width = bounds.Width / dpi.DpiScaleX;
+        Height = bounds.Height / dpi.DpiScaleY;
     }
 
     private void Refresh()
@@ -85,11 +94,13 @@ public partial class StartupWatchWindow : Window
             if (row.TimedOut)
                 continue;
 
-            if (StartupWatch.IsRunning(row.Entry.ProcessName))
+            if (StartupWatch.IsRunning(row.Entry))
             {
                 row.Ready = true;
-                row.Dot.Fill = ReadyBrush;
+                row.Index.Foreground = ReadyBrush;
                 row.Name.Foreground = ReadyBrush;
+                row.Status.Foreground = ReadyBrush;
+                row.Status.Text = "ONLINE";
                 green++;
                 continue;
             }
@@ -107,20 +118,32 @@ public partial class StartupWatchWindow : Window
         if (pending > 0 || _closeQueued) return;
 
         _timer.Stop();
-        _closeQueued = true;
         if (green == _rows.Length)
         {
             var close = new DispatcherTimer { Interval = CloseAfterAllGreen };
             close.Tick += (_, _) =>
             {
                 close.Stop();
-                Close();
+                BeginClose();
             };
             close.Start();
             return;
         }
 
-        Close();
+        BeginClose();
+    }
+
+    private void BeginClose()
+    {
+        if (_closeQueued) return;
+        _closeQueued = true;
+        _timer.Stop();
+        var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(280))
+        {
+            FillBehavior = FillBehavior.HoldEnd,
+        };
+        fade.Completed += (_, _) => Close();
+        BeginAnimation(OpacityProperty, fade);
     }
 
     private void UpdateHint()
@@ -130,31 +153,50 @@ public partial class StartupWatchWindow : Window
         {
             if (row.Ready) green++;
         }
-        Hint.Text = $"{green}/{_rows.Length} 已启动";
+        Clock.Text = DateTime.Now.ToString("HH:mm:ss");
+        Hint.Text = $"{green}/{_rows.Length}";
+        HintSub.Text = green == _rows.Length ? "ONLINE" : "WAITING";
+        HintSub.Foreground = green == _rows.Length ? ReadyBrush : PendingBrush;
+        var track = ProgressTrack.ActualWidth;
+        ProgressFill.Width = track > 0 && _rows.Length > 0 ? track * green / _rows.Length : 0;
     }
 
-    private static Row MakeRow(StartupEntry entry)
+    private static Row MakeRow(int index, StartupEntry entry)
     {
-        var dot = new Ellipse
+        var idx = new TextBlock
         {
-            Width = 8,
-            Height = 8,
-            Fill = PendingBrush,
+            Text = index.ToString("00"),
+            Width = 36,
+            Foreground = DimBrush,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 8, 0),
         };
         var name = new TextBlock
         {
             Text = entry.Name,
             Foreground = PendingBrush,
+            FontSize = 20,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        var panel = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
-        DockPanel.SetDock(dot, Dock.Left);
-        panel.Children.Add(dot);
+        var status = new TextBlock
+        {
+            Text = "WAIT",
+            Width = 88,
+            Foreground = PendingBrush,
+            FontSize = 14,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var panel = new Grid { Margin = new Thickness(0, 8, 48, 8) };
+        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(name, 1);
+        Grid.SetColumn(status, 2);
+        panel.Children.Add(idx);
         panel.Children.Add(name);
-        return new Row(entry, panel, dot, name);
+        panel.Children.Add(status);
+        return new Row(entry, panel, idx, name, status);
     }
 
     private static SolidColorBrush Freeze(System.Windows.Media.Color color)
@@ -166,18 +208,20 @@ public partial class StartupWatchWindow : Window
 
     private sealed class Row
     {
-        public Row(StartupEntry entry, DockPanel panel, Ellipse dot, TextBlock name)
+        public Row(StartupEntry entry, Grid panel, TextBlock index, TextBlock name, TextBlock status)
         {
             Entry = entry;
             Panel = panel;
-            Dot = dot;
+            Index = index;
             Name = name;
+            Status = status;
         }
 
         public StartupEntry Entry { get; }
-        public DockPanel Panel { get; }
-        public Ellipse Dot { get; }
+        public Grid Panel { get; }
+        public TextBlock Index { get; }
         public TextBlock Name { get; }
+        public TextBlock Status { get; }
         public bool Ready { get; set; }
         public bool TimedOut { get; set; }
     }

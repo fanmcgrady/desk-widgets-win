@@ -5,11 +5,11 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="方老师的工作区"
         WindowStyle="None"
-        AllowsTransparency="True"
+        AllowsTransparency="False"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         Topmost="True"
-        Background="Transparent"
+        Background="#F5F5F7"
         FontFamily="Microsoft YaHei UI"
         FontSize="12"
         PreviewKeyDown="Window_PreviewKeyDown"
@@ -151,8 +151,7 @@
     </Style>
   </Window.Resources>
 
-  <!-- 浅罩 + Accent 亚克力模糊；左边一线像玻璃边缘 -->
-  <Border x:Name="PanelShell" Background="#66F5F5F7" BorderBrush="#55FFFFFF" BorderThickness="1,0,0,0">
+  <Border x:Name="PanelShell" Background="#F5F5F7" BorderThickness="0">
     <DockPanel Margin="12,10,12,10">
       <!-- 顶栏标题 -->
       <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10" LastChildFill="False">
@@ -221,9 +220,14 @@
           </StackPanel>
         </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Cursor="Hand" Background="Transparent"
+                Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
                 MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Alt+5 · Alt+空格">
           <TextBlock x:Name="TabAgentText" Text="模型" FontSize="13" Foreground="{StaticResource Muted}"/>
+        </Border>
+        <Border x:Name="TabFileBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Alt+6">
+          <TextBlock x:Name="TabFileText" Text="文件" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
 
@@ -328,9 +332,15 @@
                 <TextBlock x:Name="CyberModeHotText" Text="热点" FontSize="12.5" FontWeight="SemiBold"/>
               </Border>
               <Border x:Name="CyberModeFavBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                      Cursor="Hand" Padding="0,0,0,4"
+                      Margin="0,0,14,0" Cursor="Hand" Padding="0,0,0,4"
                       MouseLeftButtonUp="CyberModeFav_Click">
                 <TextBlock x:Name="CyberModeFavText" Text="收藏" FontSize="12.5"
+                           Foreground="{StaticResource Muted}"/>
+              </Border>
+              <Border x:Name="CyberModeSourceBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                      Cursor="Hand" Padding="0,0,0,4"
+                      MouseLeftButtonUp="CyberModeSource_Click">
+                <TextBlock x:Name="CyberModeSourceText" Text="源" FontSize="12.5"
                            Foreground="{StaticResource Muted}"/>
               </Border>
             </StackPanel>
@@ -342,6 +352,7 @@
             </StackPanel>
           </DockPanel>
           <Grid>
+            <Grid x:Name="CyberNewsBody">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="220"/>
               <ColumnDefinition Width="8"/>
@@ -392,6 +403,38 @@
                                   IsHitTestVisible="False"/>
                   </Grid>
                 </Border>
+              </DockPanel>
+            </Border>
+            </Grid>
+            <Border x:Name="CyberSourceHost" Visibility="Collapsed" Background="White"
+                    CornerRadius="10" BorderBrush="#10000000" BorderThickness="1" Padding="12,10">
+              <DockPanel>
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="64"/>
+                  </Grid.ColumnDefinitions>
+                  <Border Grid.Column="0" Background="#08000000" CornerRadius="6" Padding="8,0">
+                    <TextBox x:Name="CyberSourceName" Style="{StaticResource PlainInput}" Height="30"
+                             FontSize="12.5" ToolTip="名称，可空"
+                             GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                  </Border>
+                  <Border Grid.Column="2" Background="#08000000" CornerRadius="6" Padding="8,0">
+                    <TextBox x:Name="CyberSourceUrl" Style="{StaticResource PlainInput}" Height="30"
+                             FontSize="12.5" ToolTip="RSS 或 Atom 地址"
+                             GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+                  </Border>
+                  <Button Grid.Column="4" Content="添加" Style="{StaticResource PrimaryBtn}" Height="30"
+                          Click="BtnCyberSourceAdd_Click"/>
+                </Grid>
+                <TextBlock x:Name="CyberSourceStatus" DockPanel.Dock="Top" FontSize="11"
+                           Foreground="{StaticResource Muted}" Margin="0,0,0,8" Text="名称可空，地址必填"/>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                  <StackPanel x:Name="CyberSourceList"/>
+                </ScrollViewer>
               </DockPanel>
             </Border>
           </Grid>
@@ -642,6 +685,30 @@
               </ScrollViewer>
             </Border>
           </Grid>
+        </DockPanel>
+
+        <!-- 文件：Everything 搜索 -->
+        <DockPanel x:Name="FilePanel" Visibility="Collapsed">
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="True">
+            <Button x:Name="BtnEverythingStart" DockPanel.Dock="Right" Content="启动"
+                    Style="{StaticResource PrimaryBtn}" Height="32" Margin="8,0,0,0"
+                    Click="BtnEverythingStart_Click" Visibility="Collapsed"
+                    ToolTip="启动 Everything 到托盘"/>
+            <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
+                    Padding="10,0">
+              <TextBox x:Name="FileSearchBox" Style="{StaticResource PlainInput}" Height="32"
+                       FontSize="13" ToolTip="Everything 语法，例如 *.pdf"
+                       TextChanged="FileSearchBox_TextChanged"
+                       GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+            </Border>
+          </DockPanel>
+          <TextBlock x:Name="FileSearchHint" DockPanel.Dock="Top" Margin="2,0,0,6"
+                     FontSize="11" Foreground="{StaticResource Muted}" Text="输入文件名"/>
+          <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+              <StackPanel x:Name="FileSearchList"/>
+            </ScrollViewer>
+          </Border>
         </DockPanel>
 
         <!-- 大模型：固定 Agent 模式 -->

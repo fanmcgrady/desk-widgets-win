@@ -36,8 +36,8 @@ public partial class MainWindow : Window
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
     private const int EdgeExpandDwellMs = 320;
 
-    private enum TabMode { Note, Todo, Mail, Agent, Cyber }
-    private enum CyberListMode { Hot, Fav }
+    private enum TabMode { Note, Todo, Mail, Agent, Cyber, File }
+    private enum CyberListMode { Hot, Fav, Sources }
 
     private readonly Store _store = new();
     private readonly NoteFiles _notes = new();
@@ -97,10 +97,10 @@ public partial class MainWindow : Window
     private bool _mouseHookInstalled;
     private IntPtr _mouseHook = IntPtr.Zero;
     private LowLevelMouseProc? _mouseProc;
-    private bool _escHeld;
-    private bool _escChorded; // 按住 Esc 期间按过别的键
-    private DateTime _escDownUtc = DateTime.MinValue;
-    private DateTime _lastEscTapUtc = DateTime.MinValue;
+    private bool _ctrlHeld;
+    private bool _ctrlChorded;
+    private DateTime _ctrlDownUtc = DateTime.MinValue;
+    private DateTime _lastCtrlTapUtc = DateTime.MinValue;
     private bool _altSpaceHeld;
     /// <summary>按下 Alt+空格 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
     private DateTime _agentFocusRequestedUtc = DateTime.MinValue;
@@ -109,11 +109,12 @@ public partial class MainWindow : Window
     private bool _agentFocusBusy;
     private bool _agentFocusHooked;
 
-    // 全局唤醒：连按两下 Esc；大模型：Alt+空格；展开时 Alt+1..5 用 RegisterHotKey
+    // 全局唤醒：连按两下 Ctrl；消失：Esc；大模型：Alt+空格；展开时 Alt+1..5 用 RegisterHotKey
     private const int HotkeyIdTabBase = 0xD510; // +1..+5
     private const uint ModAlt = 0x0001;
     private const uint ModNoRepeat = 0x4000;
     private const uint WmHotkey = 0x0312;
+    private const int WmWindowPosChanging = 0x0046;
     private const uint VkSpace = 0x20;
     private const uint LlKhfInjected = 0x10;
     private const uint LlKhfAltDown = 0x20;
@@ -129,6 +130,8 @@ public partial class MainWindow : Window
     private const int WmSysKeyDown = 0x0104;
     private const int WmSysKeyUp = 0x0105;
     private const uint VkControl = 0x11;
+    private const uint VkLControl = 0xA2;
+    private const uint VkRControl = 0xA3;
     private const uint VkMenu = 0x12; // Alt
     private const uint VkShift = 0x10;
     private const uint VkLShift = 0xA0;
@@ -140,9 +143,9 @@ public partial class MainWindow : Window
     private const uint VkRight = 0x27;
     private const uint VkDown = 0x28;
     private const uint GaRoot = 2;
-    /// <summary>单次 Esc 轻点最长按住时间。</summary>
+    /// <summary>单次 Ctrl 轻点最长按住时间。</summary>
     private static readonly TimeSpan EscTapMaxHold = TimeSpan.FromMilliseconds(400);
-    /// <summary>两次 Esc 轻点间隔上限。</summary>
+    /// <summary>两次 Ctrl 轻点间隔上限。</summary>
     private static readonly TimeSpan DoubleEscWindow = TimeSpan.FromMilliseconds(450);
     private FileSystemWatcher? _noteWatcher;
     private WinForms.Screen? _dockScreen;
@@ -169,13 +172,9 @@ public partial class MainWindow : Window
     private bool _showDone;
     private bool _filterByDay;
     private bool _inputFocused;
-    /// <summary>行内编辑等：Esc 优先取消，而不是只清焦点。</summary>
+    /// <summary>行内编辑等：Esc 先取消编辑。</summary>
     private Action? _inlineEscCancel;
-    /// <summary>输入框里已按过一次 Esc；再按则收起（避免 NoteEdit 抢回焦点后两段 Esc 失效）。</summary>
-    private bool _escDismissArmed;
     private bool _syncing;
-    /// <summary>Accent 亚克力是否已挂上（失败时退回半透明实色）。</summary>
-    private bool _acrylicApplied;
     private string? _activeNoteId;
     private string? _editingTodoId; // 从待办「编辑」进入时，笔记区改的是这条待办
     private bool _noteLoading;
@@ -194,25 +193,7 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        AllowsTransparency = true;
-        Background = MediaBrushes.Transparent;
-
         InitializeComponent();
-
-        // 先铺浅罩，Accent 挂上后可见模糊；失败则加浓实色
-        PanelShell.Background = new SolidColorBrush(MediaColor.FromArgb(0x90, 0xF5, 0xF5, 0xF7));
-        SourceInitialized += (_, _) => ApplyGlassEffect();
-        Loaded += (_, _) =>
-        {
-            ApplyGlassEffect();
-            var retry = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-            retry.Tick += (_, _) =>
-            {
-                retry.Stop();
-                ApplyGlassEffect();
-            };
-            retry.Start();
-        };
 
         _sync = new MsToDoSync(_store);
         var now = DateTime.Today;
@@ -237,6 +218,12 @@ public partial class MainWindow : Window
         // 网安热点：每小时拉取，未读累加；角标显示条数
         _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
         _cyberPollTimer.Tick += async (_, _) => await PollCyberNewsAsync(silent: true);
+
+        _fileSearchTimer.Tick += (_, _) =>
+        {
+            _fileSearchTimer.Stop();
+            RunFileSearch();
+        };
 
         Loaded += OnLoaded;
         Closing += (_, e) =>
@@ -308,11 +295,8 @@ public partial class MainWindow : Window
         _displayDebounce?.Stop();
         _dockLockUntilUtc = DateTime.UtcNow.AddSeconds(3);
 
-        // 尽量留在原屏；原屏没了才退回主屏（比「最右侧」在投屏时更稳）
-        var resolved = ResolveScreen(_dockScreen);
-        _dockScreen = resolved
-                      ?? WinForms.Screen.PrimaryScreen
-                      ?? PickDefaultDockScreen();
+        // 始终回到主屏，不跟着扩展屏或投屏走
+        _dockScreen = PickDefaultDockScreen();
 
         // 强制重放一次（忽略上次坐标缓存）
         _lastPlaceX = int.MinValue;
@@ -402,39 +386,6 @@ public partial class MainWindow : Window
     private const byte VkW = 0x57;
 
     [DllImport("user32.dll")]
-    private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
-
-    private enum AccentState
-    {
-        Disabled = 0,
-        EnableBlurBehind = 3,
-        EnableAcrylicBlurBehind = 4,
-        EnableHostBackdrop = 5,
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct AccentPolicy
-    {
-        public AccentState AccentState;
-        public uint AccentFlags;
-        public uint GradientColor; // ABGR
-        public uint AnimationId;
-    }
-
-    private enum WindowCompositionAttribute
-    {
-        WcaAccentPolicy = 19,
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WindowCompositionAttributeData
-    {
-        public WindowCompositionAttribute Attribute;
-        public IntPtr Data;
-        public int SizeOfData;
-    }
-
-    [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
 
     [DllImport("user32.dll")]
@@ -475,14 +426,12 @@ public partial class MainWindow : Window
 
     private static WinForms.Screen PickDefaultDockScreen()
     {
-        // 默认停靠「最右侧」显示器（扩展屏常在主屏右边）
-        WinForms.Screen? best = null;
+        // 始终停在 Windows 主屏幕右侧，不跟扩展屏
         foreach (var s in WinForms.Screen.AllScreens)
         {
-            if (best == null || s.Bounds.Right > best.Bounds.Right)
-                best = s;
+            if (s.Primary) return s;
         }
-        return best ?? WinForms.Screen.PrimaryScreen!;
+        return WinForms.Screen.PrimaryScreen ?? WinForms.Screen.AllScreens[0];
     }
 
     private static WinForms.Screen? ResolveScreen(WinForms.Screen? screen)
@@ -493,6 +442,14 @@ public partial class MainWindow : Window
             if (s.DeviceName == screen.DeviceName) return s;
         }
         return null;
+    }
+
+    /// <summary>WPF 当前把 DIP 换成像素的比例。还没有视觉树时退回调用方给的比例。</summary>
+    private double WpfDeviceScale(double fallback)
+    {
+        var src = PresentationSource.FromVisual(this);
+        var m = src?.CompositionTarget?.TransformToDevice.M11 ?? 0;
+        return m > 0.01 ? m : fallback;
     }
 
     private static double DpiScale(WinForms.Screen screen)
@@ -571,84 +528,10 @@ public partial class MainWindow : Window
             helper.EnsureHandle();
     }
 
-    /// <summary>Accent 亚克力/模糊（配 AllowsTransparency）。系统「透明效果」需打开。</summary>
-    private void ApplyGlassEffect()
-    {
-        // 成功时浅罩透出模糊；失败时加浓，避免整窗全透
-        var frostLite = new SolidColorBrush(MediaColor.FromArgb(0x66, 0xF5, 0xF5, 0xF7));
-        var frostSolid = new SolidColorBrush(MediaColor.FromArgb(0xC8, 0xF5, 0xF5, 0xF7));
-        try
-        {
-            EnsureHwnd();
-            var hwnd = new WindowInteropHelper(this).Handle;
-            if (hwnd == IntPtr.Zero) return;
-
-            Background = MediaBrushes.Transparent;
-            // 让 DWM 模糊能透过 WPF 清屏色
-            var src = HwndSource.FromHwnd(hwnd);
-            if (src?.CompositionTarget != null)
-                src.CompositionTarget.BackgroundColor = Colors.Transparent;
-
-            // GradientColor=ABGR；优先亚克力，再普通模糊
-            var tintAbgr = unchecked((uint)((0xA8 << 24) | (0xF8 << 16) | (0xF7 << 8) | 0xF5));
-
-            if (TrySetAccent(hwnd, AccentState.EnableAcrylicBlurBehind, tintAbgr)
-                || TrySetAccent(hwnd, AccentState.EnableBlurBehind, tintAbgr))
-            {
-                _acrylicApplied = true;
-                PanelShell.Background = frostLite;
-                return;
-            }
-
-            if (!_acrylicApplied)
-                PanelShell.Background = frostSolid;
-        }
-        catch
-        {
-            if (_acrylicApplied) return;
-            try { PanelShell.Background = frostSolid; }
-            catch { /* ignore */ }
-        }
-    }
-
-    private static bool TrySetAccent(IntPtr hwnd, AccentState state, uint gradientAbgr)
-    {
-        try
-        {
-            var policy = new AccentPolicy
-            {
-                AccentState = state,
-                AccentFlags = 2, // 画满客户区
-                GradientColor = gradientAbgr,
-                AnimationId = 0,
-            };
-            var size = Marshal.SizeOf<AccentPolicy>();
-            var ptr = Marshal.AllocHGlobal(size);
-            try
-            {
-                Marshal.StructureToPtr(policy, ptr, false);
-                var data = new WindowCompositionAttributeData
-                {
-                    Attribute = WindowCompositionAttribute.WcaAccentPolicy,
-                    Data = ptr,
-                    SizeOfData = size,
-                };
-                return SetWindowCompositionAttribute(hwnd, ref data) != 0;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private double ActivePanelWidthDip => _tab switch
     {
         TabMode.Cyber => CyberReadingWidthDip(),
+        TabMode.File => PanelWidthMailDip,
         TabMode.Agent => PanelWidthMailDip,
         TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
         _ => PanelWidthDip, // 笔记 / 待办 / 邮件列表：窄栏
@@ -678,19 +561,22 @@ public partial class MainWindow : Window
         EnsureHwnd();
         var hwnd = new WindowInteropHelper(this).Handle;
         var scale = DpiScale(screen);
-        var dipW = expanded ? ActivePanelWidthDip : PanelWidthDip;
-        dipW = CapPanelWidthDip(screen, dipW);
-        var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
+        var wpfScale = WpfDeviceScale(scale);
+        // 收起时只留 1 像素在主屏右缘内侧。再往右就是扩展屏。
+        var dipW = expanded ? CapPanelWidthDip(screen, ActivePanelWidthDip) : 1.0 / scale;
+        var widthPx = expanded ? Math.Max(1, (int)Math.Round(dipW * scale)) : 1;
         var wa = screen.WorkingArea;
-        var x = expanded ? wa.Right - widthPx : wa.Right;
+        var x = wa.Right - widthPx;
         var y = wa.Top;
         var h = Math.Max(1, wa.Height);
+        dipW = widthPx / wpfScale;
 
         // 坐标未变则跳过 MoveWindow，减少投屏时闪跳
         if (x == _lastPlaceX && y == _lastPlaceY && widthPx == _lastPlaceW && h == _lastPlaceH
             && Math.Abs(Width - dipW) < 0.5)
         {
             if (expanded) Show();
+            else Hide();
             return;
         }
 
@@ -699,14 +585,17 @@ public partial class MainWindow : Window
         _lastPlaceW = widthPx;
         _lastPlaceH = h;
 
-        // WPF 尺寸用 DIP；实际位置用像素 MoveWindow，避免多屏 DPI 错位
+        // 宽高按这块屏的像素来，再换成 WPF 正在用的比例，避免 200% 和 125% 叠在一起把窗口撑大
         Width = dipW;
-        Height = h / scale;
+        Height = h / wpfScale;
         MoveWindow(hwnd, x, y, widthPx, h, true);
         if (expanded)
         {
             Show();
-            ApplyGlassEffect();
+        }
+        else
+        {
+            Hide();
         }
     }
 
@@ -753,20 +642,14 @@ public partial class MainWindow : Window
         Expand();
     }
 
-    /// <summary>连按两下 Esc：收起时展开；已展开且在前台则收起；否则置顶唤醒。</summary>
-    private void ToggleWakeFromHotkey()
+    /// <summary>连按两下 Ctrl：展开侧栏。已经展开则置顶。</summary>
+    private void WakeFromHotkey()
     {
-        _lastEscTapUtc = DateTime.MinValue;
-        if (_expanded && IsActive && !_pinned)
-        {
-            Collapse();
-            return;
-        }
+        _lastCtrlTapUtc = DateTime.MinValue;
         if (_expanded)
         {
             Activate();
             Topmost = true;
-            // 主题笔记里焦点常在 NoteEdit，Alt+数字会被输入框/系统菜单吃掉
             ScheduleShellFocusReclaim();
             return;
         }
@@ -786,7 +669,6 @@ public partial class MainWindow : Window
             {
                 if (when != null && !when()) return;
                 if (activate && _expanded) Activate();
-                _escDismissArmed = false;
                 // 刚要求聚焦大模型输入框时，不要把焦点收走
                 if (ShouldKeepAgentInputFocus())
                 {
@@ -838,9 +720,9 @@ public partial class MainWindow : Window
         _keyboardProc = null;
         _keyboardHookInstalled = false;
         UninstallMouseHook();
-        _escHeld = false;
-        _escChorded = false;
-        _lastEscTapUtc = DateTime.MinValue;
+        _ctrlHeld = false;
+        _ctrlChorded = false;
+        _lastCtrlTapUtc = DateTime.MinValue;
         _altSpaceHeld = false;
     }
 
@@ -912,9 +794,9 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 键盘钩子约定：
-    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc / Alt+1..5 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
+    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc 收起 / Alt+1..5 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
     ///   （PreviewKeyDown 仅作钩子未装上时的后备）
-    /// - 全局：Esc 连按两下唤醒侧栏；Alt+空格打开大模型（吞掉，避免系统菜单一起弹出）
+    /// - 全局：Ctrl 连按两下唤醒侧栏；Alt+空格打开大模型（吞掉，避免系统菜单一起弹出）
     /// </summary>
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
@@ -949,37 +831,47 @@ public partial class MainWindow : Window
             var isShift = IsShiftVk(info.VkCode);
 
             if (down && ourFg && !isShift && TryHandleInAppHotkeyFromHook(info.VkCode))
-            {
-                if (info.VkCode == VkEscape)
-                    _lastEscTapUtc = DateTime.MinValue;
                 return (IntPtr)1;
-            }
 
-            if (info.VkCode == VkEscape && !ourFg)
+            // 双击 Ctrl → 唤醒。不吞键。低级钩子给出的是左右 Ctrl。
+            // 按住 Ctrl 再按别的键（复制、保存）不算连按。
+            var sideCtrl = info.VkCode is VkLControl or VkRControl;
+            if (sideCtrl && (info.Flags & LlKhfInjected) == 0)
             {
-                if (down && !_escHeld)
+                if (down && !_ctrlHeld)
                 {
-                    _escHeld = true;
-                    _escChorded = false;
-                    _escDownUtc = DateTime.UtcNow;
+                    var now = DateTime.UtcNow;
+                    _ctrlHeld = true;
+                    _ctrlChorded = false;
+                    _ctrlDownUtc = now;
+                    if (_lastCtrlTapUtc != DateTime.MinValue
+                        && now - _lastCtrlTapUtc <= DoubleEscWindow)
+                    {
+                        _lastCtrlTapUtc = DateTime.MinValue;
+                        Dispatcher.BeginInvoke(WakeFromHotkey);
+                    }
                 }
-                else if (up && _escHeld)
+                else if (up && _ctrlHeld)
                 {
-                    _escHeld = false;
-                    var held = DateTime.UtcNow - _escDownUtc;
-                    if (!_escChorded && held <= EscTapMaxHold)
-                        OnEscTap();
-                    _escChorded = false;
+                    _ctrlHeld = false;
+                    var held = DateTime.UtcNow - _ctrlDownUtc;
+                    _lastCtrlTapUtc = !_ctrlChorded && held <= EscTapMaxHold
+                        ? DateTime.UtcNow
+                        : DateTime.MinValue;
+                    _ctrlChorded = false;
                 }
             }
-            else if (down && _escHeld && !isShift)
+            else if (down && _ctrlHeld && (info.Flags & LlKhfInjected) == 0 && !IsCtrlVk(info.VkCode))
             {
-                _escChorded = true;
-                _lastEscTapUtc = DateTime.MinValue;
+                _ctrlChorded = true;
+                _lastCtrlTapUtc = DateTime.MinValue;
             }
         }
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
+
+    private static bool IsCtrlVk(uint vk) =>
+        vk is VkControl or VkLControl or VkRControl;
 
     /// <summary>Alt 按下、Ctrl/Shift 都没按下。左右 Alt 都算。</summary>
     private static bool IsAltSpaceChord()
@@ -1056,6 +948,7 @@ public partial class MainWindow : Window
             0x33 or 0x63 => 3,
             0x34 or 0x64 => 4,
             0x35 or 0x65 => 5,
+            0x36 or 0x66 => 6,
             _ => 0,
         };
         if (digit == 0) return false;
@@ -1071,21 +964,9 @@ public partial class MainWindow : Window
         3 => InvokeTabClick(TabMail_Click),
         4 => InvokeTabClick(TabCyber_Click),
         5 => InvokeTabClick(TabAgent_Click),
+        6 => InvokeTabClick(TabFile_Click),
         _ => false,
     };
-
-    private void OnEscTap()
-    {
-        var now = DateTime.UtcNow;
-        if (_lastEscTapUtc != DateTime.MinValue
-            && now - _lastEscTapUtc <= DoubleEscWindow)
-        {
-            _lastEscTapUtc = DateTime.MinValue;
-            Dispatcher.BeginInvoke(ToggleWakeFromHotkey);
-            return;
-        }
-        _lastEscTapUtc = now;
-    }
 
     private void UpdateTrayHotkeyTip()
     {
@@ -1093,7 +974,7 @@ public partial class MainWindow : Window
         var parts = new List<string> { "方老师的工作区" };
         if (_keyboardHookInstalled)
         {
-            parts.Add("连按两下 Esc");
+            parts.Add("连按两下 Ctrl");
             parts.Add("Alt+空格 大模型");
         }
         _tray.Text = string.Join(" · ", parts);
@@ -1222,11 +1103,30 @@ public partial class MainWindow : Window
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowPos
+    {
+        public IntPtr hwnd;
+        public IntPtr hwndInsertAfter;
+        public int x, y, cx, cy;
+        public uint flags;
+    }
+
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WmWindowPosChanging && _lastPlaceX != int.MinValue && _lastPlaceW > 0 && _lastPlaceH > 0)
+        {
+            var pos = Marshal.PtrToStructure<WindowPos>(lParam);
+            pos.x = _lastPlaceX;
+            pos.y = _lastPlaceY;
+            pos.cx = _lastPlaceW;
+            pos.cy = _lastPlaceH;
+            pos.flags &= ~3u; // 清掉不移动、不改大小，按上面的矩形来
+            Marshal.StructureToPtr(pos, lParam, false);
+        }
         if ((uint)msg != WmHotkey) return IntPtr.Zero;
         var id = wParam.ToInt32();
-        if (id is >= HotkeyIdTabBase + 1 and <= HotkeyIdTabBase + 5)
+        if (id is >= HotkeyIdTabBase + 1 and <= HotkeyIdTabBase + 6)
         {
             handled = true;
             var digit = id - HotkeyIdTabBase;
@@ -1251,7 +1151,6 @@ public partial class MainWindow : Window
         UnregisterTabHotkeys();
         _expanded = false;
         _pinned = false;
-        _escDismissArmed = false;
         _inputFocused = false;
         UpdatePinButton();
         _leaveSince = null;
@@ -1266,10 +1165,10 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd == IntPtr.Zero) return;
         var ok = true;
-        for (var i = 1; i <= 5; i++)
+        for (var i = 1; i <= 6; i++)
         {
             var id = HotkeyIdTabBase + i;
-            var vk = (uint)(0x30 + i); // '1'..'5'
+            var vk = (uint)(0x30 + i); // '1'..'6'
             if (!RegisterHotKey(hwnd, id, ModAlt | ModNoRepeat, vk)
                 && !RegisterHotKey(hwnd, id, ModAlt, vk))
                 ok = false;
@@ -1283,7 +1182,7 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
         {
-            for (var i = 1; i <= 5; i++)
+            for (var i = 1; i <= 6; i++)
                 UnregisterHotKey(hwnd, HotkeyIdTabBase + i);
         }
         _tabHotkeysRegistered = false;
@@ -1319,7 +1218,7 @@ public partial class MainWindow : Window
             : MaterialDesignThemes.Wpf.PackIconKind.PinOutline;
         PinIcon.Foreground = _pinned ? accent : muted;
         BtnPin.ToolTip = _pinned
-            ? "已钉住：不自动收起（F1 取消钉住，Esc 取消并隐藏）"
+            ? "已钉住：不自动收起（F1 取消钉住，Esc 收起）"
             : "钉子：固定展开、不自动收起（F1）";
     }
 
@@ -1336,15 +1235,11 @@ public partial class MainWindow : Window
                 _edgeHoverSince = null;
                 return;
             }
-            // 投屏抖动时：只响应当前停靠屏（或尚无停靠时的主屏）右缘，避免跳到虚拟/镜像屏
-            if (dockLocked)
+            // 只认主屏右缘，扩展屏贴边不把侧栏拉过去
+            if (!edgeScreen.Primary)
             {
-                var prefer = ResolveScreen(_dockScreen) ?? WinForms.Screen.PrimaryScreen;
-                if (prefer != null && edgeScreen.DeviceName != prefer.DeviceName)
-                {
-                    _edgeHoverSince = null;
-                    return;
-                }
+                _edgeHoverSince = null;
+                return;
             }
             // 其他应用全屏/最大化盖住右缘：不贴边展开（托盘仍可开）
             if (ShouldSuppressEdgeExpand(edgeScreen))
@@ -1379,17 +1274,6 @@ public partial class MainWindow : Window
                         && mouse.Y >= wa.Top + topDead && mouse.Y <= wa.Bottom;
         bool inPanel = mouse.X >= wa.Right - widthPx && mouse.X <= wa.Right
                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
-
-        // 鼠标到了另一块屏的右缘：切换停靠屏（投屏锁定期间禁止，防止乱跳）
-        if (!dockLocked
-            && edgeScreen != null
-            && edgeScreen.DeviceName != screen.DeviceName)
-        {
-            _dockScreen = edgeScreen;
-            PlaceExpanded();
-            _leaveSince = null;
-            return;
-        }
 
         if (_pinned)
         {
@@ -1476,6 +1360,7 @@ public partial class MainWindow : Window
                 Key.D3 or Key.NumPad3 => 3,
                 Key.D4 or Key.NumPad4 => 4,
                 Key.D5 or Key.NumPad5 => 5,
+                Key.D6 or Key.NumPad6 => 6,
                 _ => 0,
             };
             if (digit != 0 && TrySwitchTabByNumber(digit))
@@ -1547,7 +1432,7 @@ public partial class MainWindow : Window
             e.Handled = true;
     }
 
-    /// <summary>Esc 收起 / 退焦点；供 WPF 与键盘钩子共用（WebView 子窗在前台时走钩子）。</summary>
+    /// <summary>Esc 收起侧栏。行内改标题时先取消编辑。</summary>
     private bool TryHandleEscapeKey()
     {
         if (_inlineEscCancel != null)
@@ -1556,45 +1441,6 @@ public partial class MainWindow : Window
             _inlineEscCancel = null;
             cancel();
             _inputFocused = false;
-            _escDismissArmed = false;
-            return true;
-        }
-
-        // 主题笔记页：一次 Esc 直接收起（不靠 FocusedElement，钩子回调时焦点常已空）
-        if (_tab == TabMode.Note)
-        {
-            _escDismissArmed = false;
-            Collapse();
-            return true;
-        }
-
-        // 其它输入框：空内容一次收起；有内容则先失焦，再按一次才收起
-        if (_inputFocused && !_escDismissArmed)
-        {
-            var focused = Keyboard.FocusedElement as DependencyObject;
-            var emptyQuick =
-                (ReferenceEquals(focused, TodoInput) && string.IsNullOrWhiteSpace(TodoInput.Text))
-                || (ReferenceEquals(focused, AgentInput) && string.IsNullOrWhiteSpace(AgentInput.Text));
-
-            BlurInputFocus();
-            if (!emptyQuick)
-            {
-                _escDismissArmed = true;
-                return true;
-            }
-        }
-
-        _escDismissArmed = false;
-
-        if (_pinned)
-        {
-            Collapse();
-            return true;
-        }
-
-        if (_tab == TabMode.Mail && _mailView == MailView.Read)
-        {
-            BtnMailBack_Click(this, new RoutedEventArgs());
             return true;
         }
 
@@ -1669,7 +1515,7 @@ public partial class MainWindow : Window
             item.Click += onClick;
             menu.Items.Add(item);
         }
-        AddItem("展开侧栏\t连按两下 Esc", (_, _) => Dispatcher.Invoke(ExpandFromTray));
+        AddItem("展开侧栏\t连按两下 Ctrl", (_, _) => Dispatcher.Invoke(WakeFromHotkey));
         AddItem("大模型输入\tAlt+空格", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
         AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
@@ -2177,7 +2023,163 @@ public partial class MainWindow : Window
         ExitTodoEditMode();
         _tab = TabMode.Agent;
         StyleTabs();
+        // 先占住焦点。Alt+5 随后会收回壳层焦点；时间线加载完还会再抢一次。
+        FocusAgentInputSoon();
         _ = EnterAgentTabAsync();
+    }
+
+    private void TabFile_Click(object sender, MouseButtonEventArgs e)
+    {
+        FlushNoteSave();
+        RefreshNoteChipTitlesIfNeeded();
+        ExitTodoEditMode();
+        _tab = TabMode.File;
+        StyleTabs();
+        FileSearchBox.Focus();
+        RunFileSearch();
+    }
+
+    private readonly DispatcherTimer _fileSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    private bool _fileSearchBusy;
+    private bool _fileSearchQueued;
+
+    private void FileSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _fileSearchTimer.Stop();
+        _fileSearchTimer.Start();
+    }
+
+    private void BtnEverythingStart_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EverythingSearch.TryStart())
+        {
+            FileSearchHint.Text = "没找到 Everything.exe";
+            return;
+        }
+        FileSearchHint.Text = "正在启动…";
+        BtnEverythingStart.IsEnabled = false;
+        var wait = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        var tries = 0;
+        wait.Tick += (_, _) =>
+        {
+            tries++;
+            if (EverythingSearch.IsRunning() || tries >= 12)
+            {
+                wait.Stop();
+                BtnEverythingStart.IsEnabled = true;
+                RunFileSearch();
+            }
+        };
+        wait.Start();
+    }
+
+    private void RunFileSearch()
+    {
+        if (_fileSearchBusy)
+        {
+            _fileSearchQueued = true;
+            return;
+        }
+        _fileSearchBusy = true;
+        try
+        {
+            do
+            {
+                _fileSearchQueued = false;
+                RunFileSearchOnce();
+            }
+            while (_fileSearchQueued);
+        }
+        finally
+        {
+            _fileSearchBusy = false;
+        }
+    }
+
+    private void RunFileSearchOnce()
+    {
+        if (_tab != TabMode.File) return;
+        var text = FileSearchBox.Text.Trim();
+        FileSearchList.Children.Clear();
+        if (!EverythingSearch.IsRunning())
+        {
+            FileSearchHint.Text = EverythingSearch.InstalledExe() == null
+                ? "没找到 Everything"
+                : "Everything 没在运行";
+            BtnEverythingStart.Visibility = EverythingSearch.InstalledExe() == null
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+            return;
+        }
+        BtnEverythingStart.Visibility = Visibility.Collapsed;
+        if (text.Length == 0)
+        {
+            FileSearchHint.Text = "输入文件名";
+            return;
+        }
+        IReadOnlyList<EverythingHit> hits;
+        try
+        {
+            hits = EverythingSearch.Query(text);
+        }
+        catch (Exception ex)
+        {
+            FileSearchHint.Text = ShortErr(ex);
+            return;
+        }
+        FileSearchHint.Text = hits.Count == 0 ? "没有结果" : $"{hits.Count} 条";
+        foreach (var hit in hits)
+        {
+            var capture = hit;
+            var kind = new TextBlock
+            {
+                Text = capture.IsFolder ? "目录" : "文件",
+                Width = 36,
+                FontSize = 11,
+                Foreground = (MediaBrush)FindResource("Muted"),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var name = new TextBlock
+            {
+                Text = capture.Name,
+                FontSize = 13,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            var dir = new TextBlock
+            {
+                Text = capture.Directory,
+                FontSize = 11,
+                Foreground = (MediaBrush)FindResource("Muted"),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(0, 1, 0, 0),
+            };
+            var textCol = new StackPanel();
+            textCol.Children.Add(name);
+            textCol.Children.Add(dir);
+            var row = new DockPanel
+            {
+                Margin = new Thickness(8, 6, 8, 6),
+                Cursor = WpfCursors.Hand,
+                ToolTip = capture.FullPath,
+            };
+            DockPanel.SetDock(kind, Dock.Left);
+            row.Children.Add(kind);
+            row.Children.Add(textCol);
+            row.MouseLeftButtonUp += (_, _) => OpenEverythingHit(capture);
+            FileSearchList.Children.Add(row);
+        }
+    }
+
+    private void OpenEverythingHit(EverythingHit hit)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(hit.FullPath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            FileSearchHint.Text = ShortErr(ex);
+        }
     }
 
     private void TabCyber_Click(object sender, MouseButtonEventArgs e)
@@ -2199,6 +2201,11 @@ public partial class MainWindow : Window
         _ = EnsureCyberWebAsync();
         ScheduleShellFocusReclaim(when: () => _tab == TabMode.Cyber);
 
+        if (_cyberListMode == CyberListMode.Sources)
+        {
+            ShowCyberSourceList();
+            return;
+        }
         if (_cyberListMode == CyberListMode.Fav)
         {
             ShowCyberFavList();
@@ -3041,12 +3048,14 @@ public partial class MainWindow : Window
         Paint(TabMailBorder, TabMailText, _tab == TabMode.Mail);
         Paint(TabCyberBorder, TabCyberText, _tab == TabMode.Cyber);
         Paint(TabAgentBorder, TabAgentText, _tab == TabMode.Agent);
+        Paint(TabFileBorder, TabFileText, _tab == TabMode.File);
 
         NotePanel.Visibility = _tab == TabMode.Note ? Visibility.Visible : Visibility.Collapsed;
         TodoPanel.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         MailPanel.Visibility = _tab == TabMode.Mail ? Visibility.Visible : Visibility.Collapsed;
         CyberNewsPanel.Visibility = _tab == TabMode.Cyber ? Visibility.Visible : Visibility.Collapsed;
         AgentPanel.Visibility = _tab == TabMode.Agent ? Visibility.Visible : Visibility.Collapsed;
+        FilePanel.Visibility = _tab == TabMode.File ? Visibility.Visible : Visibility.Collapsed;
         // 日历只在「待办事项」显示
         CalendarHost.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         if (_tab != TabMode.Cyber)
@@ -3062,12 +3071,19 @@ public partial class MainWindow : Window
         var muted = (MediaBrush)FindResource("Muted");
         var fg = (MediaBrush)FindResource("Fg");
         var hot = _cyberListMode == CyberListMode.Hot;
+        var fav = _cyberListMode == CyberListMode.Fav;
+        var sources = _cyberListMode == CyberListMode.Sources;
         CyberModeHotBorder.BorderBrush = hot ? accent : MediaBrushes.Transparent;
         CyberModeHotText.Foreground = hot ? fg : muted;
         CyberModeHotText.FontWeight = hot ? FontWeights.SemiBold : FontWeights.Normal;
-        CyberModeFavBorder.BorderBrush = hot ? MediaBrushes.Transparent : accent;
-        CyberModeFavText.Foreground = hot ? muted : fg;
-        CyberModeFavText.FontWeight = hot ? FontWeights.Normal : FontWeights.SemiBold;
+        CyberModeFavBorder.BorderBrush = fav ? accent : MediaBrushes.Transparent;
+        CyberModeFavText.Foreground = fav ? fg : muted;
+        CyberModeFavText.FontWeight = fav ? FontWeights.SemiBold : FontWeights.Normal;
+        CyberModeSourceBorder.BorderBrush = sources ? accent : MediaBrushes.Transparent;
+        CyberModeSourceText.Foreground = sources ? fg : muted;
+        CyberModeSourceText.FontWeight = sources ? FontWeights.SemiBold : FontWeights.Normal;
+        CyberNewsBody.Visibility = sources ? Visibility.Collapsed : Visibility.Visible;
+        CyberSourceHost.Visibility = sources ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void CyberModeHot_Click(object sender, MouseButtonEventArgs e)
@@ -3100,6 +3116,78 @@ public partial class MainWindow : Window
         StyleCyberModeTabs();
         HideCyberNewsDetail();
         ShowCyberFavList();
+    }
+
+    private void CyberModeSource_Click(object sender, MouseButtonEventArgs e)
+    {
+        _cyberListMode = CyberListMode.Sources;
+        StyleCyberModeTabs();
+        HideCyberNewsDetail();
+        ShowCyberSourceList();
+    }
+
+    private void ShowCyberSourceList()
+    {
+        CyberNewsHint.Text = $"{_cyberNews.Sources.Count} 个源";
+        CyberSourceStatus.Text = "名称可空，地址必填";
+        CyberSourceList.Children.Clear();
+        foreach (var feed in _cyberNews.Sources)
+        {
+            var capture = feed;
+            var name = new TextBlock
+            {
+                Text = capture.Label,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 13,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var url = new TextBlock
+            {
+                Text = capture.Url,
+                FontSize = 11,
+                Foreground = (MediaBrush)FindResource("Muted"),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 0),
+            };
+            var text = new StackPanel();
+            text.Children.Add(name);
+            text.Children.Add(url);
+            var del = new System.Windows.Controls.Button
+            {
+                Content = "删除",
+                Style = (Style)FindResource("MailGhostBtn"),
+                Height = 28,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0),
+            };
+            del.Click += (_, _) =>
+            {
+                _cyberNews.RemoveSource(capture.Url);
+                ShowCyberSourceList();
+                UpdateCyberBadge();
+            };
+            var row = new DockPanel { Margin = new Thickness(0, 6, 0, 6) };
+            DockPanel.SetDock(del, Dock.Right);
+            row.Children.Add(del);
+            row.Children.Add(text);
+            CyberSourceList.Children.Add(row);
+        }
+    }
+
+    private void BtnCyberSourceAdd_Click(object sender, RoutedEventArgs e)
+    {
+        var error = _cyberNews.TryAddSource(CyberSourceName.Text, CyberSourceUrl.Text);
+        if (error != null)
+        {
+            CyberSourceStatus.Text = error;
+            return;
+        }
+        CyberSourceName.Text = "";
+        CyberSourceUrl.Text = "";
+        CyberSourceStatus.Text = "已添加";
+        ShowCyberSourceList();
+        _ = RefreshCyberNewsAsync(force: true);
     }
 
     private void SetCyberHotHint(int? count = null)
@@ -3183,6 +3271,11 @@ public partial class MainWindow : Window
         {
             var items = await _cyberNews.RefreshAsync(force);
             UpdateCyberBadge();
+            if (_cyberListMode == CyberListMode.Sources)
+            {
+                CyberNewsHint.Text = $"{_cyberNews.Sources.Count} 个源";
+                return;
+            }
             if (_cyberListMode != CyberListMode.Hot) return;
             ShowCyberHotList(items);
             // 进页/刷新后若还没打开详情，默认看第一条
