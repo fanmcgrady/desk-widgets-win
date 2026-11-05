@@ -26,13 +26,11 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>收起贴边条 / 笔记·待办·邮件 窄栏宽度。</summary>
+    /// <summary>待办窄栏宽度。笔记、邮件、大模型、文件用同一宽栏。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>大模型等宽栏宽度。</summary>
+    /// <summary>笔记、邮件、大模型、文件的统一宽度。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 8;
-    /// <summary>右缘顶部死区（约等于最大化窗口关闭按钮高度），避免关窗时误触展开。</summary>
-    private const int TopEdgeDeadZoneDip = 56;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
     private const int EdgeExpandDwellMs = 320;
 
@@ -109,9 +107,9 @@ public partial class MainWindow : Window
     private bool _agentFocusBusy;
     private bool _agentFocusHooked;
 
-    // 全局唤醒：连按两下 Ctrl；消失：Esc；大模型：Alt+空格；展开时 Alt+1..5 用 RegisterHotKey
-    private const int HotkeyIdTabBase = 0xD510; // +1..+5
-    private const uint ModAlt = 0x0001;
+    // 全局唤醒：连按两下 Ctrl；消失：Esc；大模型：Alt+空格；展开时 Ctrl+1..6 用 RegisterHotKey
+    private const int HotkeyIdTabBase = 0xD510; // +1..+6
+    private const uint ModControl = 0x0002;
     private const uint ModNoRepeat = 0x4000;
     private const uint WmHotkey = 0x0312;
     private const int WmWindowPosChanging = 0x0046;
@@ -161,7 +159,7 @@ public partial class MainWindow : Window
     private bool _pinned;
     private bool _allowClose;
     private DateTime? _leaveSince;
-    /// <summary>贴右缘开始计时，满 dwell 才 Expand。</summary>
+    /// <summary>贴左缘开始计时，满 dwell 才 Expand。</summary>
     private DateTime? _edgeHoverSince;
     /// <summary>托盘打开后：鼠标尚未进入侧栏前不自动收起，避免一点开就被 EdgeTimer 关掉。</summary>
     private bool _awaitPanelEnter;
@@ -251,7 +249,7 @@ public partial class MainWindow : Window
         UpdateNoteChrome();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _dockScreen = PickDefaultDockScreen();
-        // 先装钩子/热键，再展开并清掉 NoteEdit 焦点，否则首次 Alt+数字会被输入框吃掉
+        // 先装钩子/热键，再展开并清掉 NoteEdit 焦点，否则首次 Ctrl+数字会被输入框吃掉
         RegisterWakeHotkey();
         Expand();
         ScheduleShellFocusReclaim();
@@ -465,17 +463,14 @@ public partial class MainWindow : Window
         return 1.0;
     }
 
-    private static WinForms.Screen? ScreenNearRightEdge(DrawingPoint mouse)
+    private static WinForms.Screen? ScreenNearLeftEdge(DrawingPoint mouse)
     {
         foreach (var s in WinForms.Screen.AllScreens)
         {
             var scale = DpiScale(s);
             var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
-            var topDead = Math.Max(40, (int)Math.Ceiling(TopEdgeDeadZoneDip * scale));
             var wa = s.WorkingArea;
-            // 右上角留给最大化窗口的关闭按钮，不触发侧栏
-            if (mouse.Y < wa.Top + topDead) continue;
-            if (mouse.X >= wa.Right - hit && mouse.X <= wa.Right + 2
+            if (mouse.X >= wa.Left - 2 && mouse.X <= wa.Left + hit
                 && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom)
                 return s;
         }
@@ -483,8 +478,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 前台是其他应用的全屏/最大化窗口且盖住右缘时，禁止贴边自动展开，
-    /// 避免看视频、玩游戏、滚右侧滚动条时误开侧栏。托盘仍可手动展开。
+    /// 前台是其他应用的全屏/最大化窗口且盖住左缘时，禁止贴边自动展开。托盘仍可手动展开。
     /// </summary>
     private bool ShouldSuppressEdgeExpand(WinForms.Screen screen)
     {
@@ -515,10 +509,10 @@ public partial class MainWindow : Window
         var coversWork = IsZoomed(fg)
                          || (r.Left <= wa.Left + 4 && r.Top <= wa.Top + 4
                              && r.Right >= wa.Right - 4 && r.Bottom >= wa.Bottom - 4);
-        // 窗口右缘压住贴边热区（滚动条常在这里）
-        var coversRightHit = r.Right >= wa.Right - hit && r.Left < wa.Right - hit;
+        // 窗口左缘压住贴边热区
+        var coversLeftHit = r.Left <= wa.Left + hit && r.Right > wa.Left + hit;
 
-        return (coversBounds || coversWork) && coversRightHit;
+        return (coversBounds || coversWork) && coversLeftHit;
     }
 
     private void EnsureHwnd()
@@ -531,13 +525,11 @@ public partial class MainWindow : Window
     private double ActivePanelWidthDip => _tab switch
     {
         TabMode.Cyber => CyberReadingWidthDip(),
-        TabMode.File => PanelWidthMailDip,
-        TabMode.Agent => PanelWidthMailDip,
-        TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
-        _ => PanelWidthDip, // 笔记 / 待办 / 邮件列表：窄栏
+        TabMode.Todo => PanelWidthDip,
+        _ => PanelWidthMailDip,
     };
 
-    /// <summary>网安页签：贴右缘向左铺满当前屏工作区。</summary>
+    /// <summary>网安页签：从左缘向右铺满当前屏工作区。</summary>
     private double CyberReadingWidthDip()
     {
         var screen = ResolveScreen(_dockScreen)
@@ -562,11 +554,11 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         var scale = DpiScale(screen);
         var wpfScale = WpfDeviceScale(scale);
-        // 收起时只留 1 像素在主屏右缘内侧。再往右就是扩展屏。
+        // 收起时只留 1 像素在主屏左缘内侧。
         var dipW = expanded ? CapPanelWidthDip(screen, ActivePanelWidthDip) : 1.0 / scale;
         var widthPx = expanded ? Math.Max(1, (int)Math.Round(dipW * scale)) : 1;
         var wa = screen.WorkingArea;
-        var x = wa.Right - widthPx;
+        var x = wa.Left;
         var y = wa.Top;
         var h = Math.Max(1, wa.Height);
         dipW = widthPx / wpfScale;
@@ -630,7 +622,7 @@ public partial class MainWindow : Window
         Activate();
         Topmost = true;
         RegisterTabHotkeys();
-        // 首次/每次展开都清输入焦点，保证 Alt+数字走热键而不是进 NoteEdit
+        // 首次/每次展开都清输入焦点，保证 Ctrl+数字走热键而不是进 NoteEdit
         ScheduleShellFocusReclaim();
     }
 
@@ -669,10 +661,15 @@ public partial class MainWindow : Window
             {
                 if (when != null && !when()) return;
                 if (activate && _expanded) Activate();
-                // 刚要求聚焦大模型输入框时，不要把焦点收走
+                // 刚要求聚焦大模型或文件搜索时，不要把焦点收走
                 if (ShouldKeepAgentInputFocus())
                 {
                     FocusAgentInputCore();
+                    return;
+                }
+                if (ShouldKeepFileInputFocus())
+                {
+                    FocusFileSearchCore();
                     return;
                 }
                 BlurInputFocus();
@@ -794,7 +791,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 键盘钩子约定：
-    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc 收起 / Alt+1..5 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
+    /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc 收起 / Ctrl+1..6 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
     ///   （PreviewKeyDown 仅作钩子未装上时的后备）
     /// - 全局：Ctrl 连按两下唤醒侧栏；Alt+空格打开大模型（吞掉，避免系统菜单一起弹出）
     /// </summary>
@@ -831,7 +828,21 @@ public partial class MainWindow : Window
             var isShift = IsShiftVk(info.VkCode);
 
             if (down && ourFg && !isShift && TryHandleInAppHotkeyFromHook(info.VkCode))
+            {
+                if (_ctrlHeld)
+                    _ctrlChorded = true;
                 return (IntPtr)1;
+            }
+
+            // 文件页切到别的程序后，搜索框焦点还在，侧栏不会随鼠标离开收起。
+            // 这时单独的 Esc 收起文件页，但不吞键，当前程序照常收到 Esc。
+            if (down && (info.Flags & LlKhfInjected) == 0
+                && _expanded && !ourFg && _tab == TabMode.File
+                && info.VkCode == VkEscape
+                && !IsAltDown() && !IsCtrlDown() && !IsShiftDown())
+            {
+                Dispatcher.BeginInvoke(TryHandleEscapeKey, DispatcherPriority.Send);
+            }
 
             // 双击 Ctrl → 唤醒。不吞键。低级钩子给出的是左右 Ctrl。
             // 按住 Ctrl 再按别的键（复制、保存）不算连按。
@@ -888,7 +899,18 @@ public partial class MainWindow : Window
     private static bool IsShiftVk(uint vk) =>
         vk is VkShift or VkLShift or VkRShift;
 
-    /// <summary>钩子层：Esc / F1 / 网安←→↑↓空格；Alt+1..5 在热键未注册时作后备。</summary>
+    private static bool IsAltDown() =>
+        (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0
+        || (GetAsyncKeyState(0xA4) & 0x8000) != 0
+        || (GetAsyncKeyState(0xA5) & 0x8000) != 0;
+
+    private static bool IsCtrlDown() =>
+        (GetAsyncKeyState((int)VkControl) & 0x8000) != 0;
+
+    private static bool IsShiftDown() =>
+        (GetAsyncKeyState((int)VkShift) & 0x8000) != 0;
+
+    /// <summary>钩子层：Esc / F1 / 网安←→↑↓空格；Ctrl+1..6 在热键未注册时作后备。</summary>
     private bool TryHandleInAppHotkeyFromHook(uint vk)
     {
         var altDown = (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0
@@ -939,8 +961,10 @@ public partial class MainWindow : Window
             }
         }
 
-        // Alt+1..5：优先 RegisterHotKey（展开时）；未注册时钩子兜底
-        if (!altDown || ctrlDown || shiftDown || _tabHotkeysRegistered) return false;
+        // Ctrl+1..6：优先 RegisterHotKey（展开且前台）；未注册时钩子兜底。小键盘热键未登记，仍走钩子。
+        if (!ctrlDown || altDown || shiftDown) return false;
+        var numpad = vk is 0x61 or 0x62 or 0x63 or 0x64 or 0x65 or 0x66;
+        if (_tabHotkeysRegistered && !numpad) return false;
         var digit = vk switch
         {
             0x31 or 0x61 => 1,
@@ -956,7 +980,7 @@ public partial class MainWindow : Window
         return true;
     }
 
-    /// <summary>Alt+1..5 / 钩子数字键共用。</summary>
+    /// <summary>Ctrl+1..6 / 钩子数字键共用。</summary>
     private bool TrySwitchTabByNumber(int digit) => digit switch
     {
         1 => InvokeTabClick(TabNote_Click),
@@ -998,6 +1022,35 @@ public partial class MainWindow : Window
         _expanded
         && _tab == TabMode.Agent
         && DateTime.UtcNow - _agentFocusRequestedUtc < TimeSpan.FromSeconds(2);
+
+    private DateTime _fileFocusRequestedUtc;
+
+    private bool ShouldKeepFileInputFocus() =>
+        _expanded
+        && _tab == TabMode.File
+        && DateTime.UtcNow - _fileFocusRequestedUtc < TimeSpan.FromSeconds(2);
+
+    /// <summary>Ctrl+6 切过来之后还会收回壳层焦点，所以立刻和稍后各放一次。</summary>
+    private void FocusFileSearchSoon()
+    {
+        _fileFocusRequestedUtc = DateTime.UtcNow;
+        FocusFileSearchCore();
+        Dispatcher.BeginInvoke(FocusFileSearchCore, DispatcherPriority.Input);
+        Dispatcher.BeginInvoke(FocusFileSearchCore, DispatcherPriority.ContextIdle);
+    }
+
+    private void FocusFileSearchCore()
+    {
+        if (!ShouldKeepFileInputFocus()) return;
+        try
+        {
+            FileSearchBox.Focusable = true;
+            FocusManager.SetFocusedElement(this, FileSearchBox);
+            Keyboard.Focus(FileSearchBox);
+            FileSearchBox.Focus();
+        }
+        catch { /* ignore */ }
+    }
 
     /// <summary>WebView 子窗会在页签切过来之后把键盘焦点抢走，所以多补几次。</summary>
     private void FocusAgentInputSoon()
@@ -1158,7 +1211,7 @@ public partial class MainWindow : Window
         PlaceCollapsed();
     }
 
-    /// <summary>仅在侧栏展开且前台时注册，避免全局抢走其它程序的 Alt+数字。</summary>
+    /// <summary>仅在侧栏展开且前台时注册，避免全局抢走其它程序的 Ctrl+数字。</summary>
     private void RegisterTabHotkeys()
     {
         if (_tabHotkeysRegistered || !_expanded) return;
@@ -1169,8 +1222,8 @@ public partial class MainWindow : Window
         {
             var id = HotkeyIdTabBase + i;
             var vk = (uint)(0x30 + i); // '1'..'6'
-            if (!RegisterHotKey(hwnd, id, ModAlt | ModNoRepeat, vk)
-                && !RegisterHotKey(hwnd, id, ModAlt, vk))
+            if (!RegisterHotKey(hwnd, id, ModControl | ModNoRepeat, vk)
+                && !RegisterHotKey(hwnd, id, ModControl, vk))
                 ok = false;
         }
         _tabHotkeysRegistered = ok;
@@ -1225,7 +1278,7 @@ public partial class MainWindow : Window
     private void EdgeTimer_Tick(object? sender, EventArgs e)
     {
         var mouse = WinForms.Control.MousePosition; // 物理像素
-        var edgeScreen = ScreenNearRightEdge(mouse);
+        var edgeScreen = ScreenNearLeftEdge(mouse);
         var dockLocked = IsDockLocked();
 
         if (!_expanded)
@@ -1235,19 +1288,19 @@ public partial class MainWindow : Window
                 _edgeHoverSince = null;
                 return;
             }
-            // 只认主屏右缘，扩展屏贴边不把侧栏拉过去
+            // 只认主屏左缘，扩展屏贴边不把侧栏拉过去
             if (!edgeScreen.Primary)
             {
                 _edgeHoverSince = null;
                 return;
             }
-            // 其他应用全屏/最大化盖住右缘：不贴边展开（托盘仍可开）
+            // 其他应用全屏/最大化盖住左缘：不贴边展开（托盘仍可开）
             if (ShouldSuppressEdgeExpand(edgeScreen))
             {
                 _edgeHoverSince = null;
                 return;
             }
-            // 需在右缘停留一小段时间，减少路过或滚轮时误触
+            // 需在左缘停留一小段时间，减少路过时误触
             _edgeHoverSince ??= DateTime.UtcNow;
             if ((DateTime.UtcNow - _edgeHoverSince.Value).TotalMilliseconds < EdgeExpandDwellMs)
                 return;
@@ -1266,13 +1319,11 @@ public partial class MainWindow : Window
         var dipW = CapPanelWidthDip(screen, ActivePanelWidthDip);
         var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
         var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
-        var topDead = Math.Max(40, (int)Math.Ceiling(TopEdgeDeadZoneDip * scale));
         var wa = screen.WorkingArea;
 
-        // 右上死区不计入「贴边」，避免关窗时把侧栏当成还在贴边而一直展开
-        bool nearEdge = mouse.X >= wa.Right - hit && mouse.X <= wa.Right + 2
-                        && mouse.Y >= wa.Top + topDead && mouse.Y <= wa.Bottom;
-        bool inPanel = mouse.X >= wa.Right - widthPx && mouse.X <= wa.Right
+        bool nearEdge = mouse.X >= wa.Left - 2 && mouse.X <= wa.Left + hit
+                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
+        bool inPanel = mouse.X >= wa.Left && mouse.X <= wa.Left + widthPx
                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
 
         if (_pinned)
@@ -1298,7 +1349,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_inputFocused || inPanel || nearEdge)
+        // 搜索框等仍记着焦点时，窗口已经不在前台就不要再挡住收起
+        var editingHere = _inputFocused && IsOurWindowForeground();
+        if (editingHere || inPanel || nearEdge)
         {
             _leaveSince = null;
             return;
@@ -1347,11 +1400,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Alt+1..5：Key.System 时 Modifiers 偶发不带 Alt，以 System 为准（钩子未装上时的后备）
-        var altHeld = e.Key == Key.System
-                      || (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt;
-        if (altHeld
-            && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == ModifierKeys.None)
+        // Ctrl+1..6：钩子未装上时的后备
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && (Keyboard.Modifiers & (ModifierKeys.Alt | ModifierKeys.Shift)) == ModifierKeys.None)
         {
             var digit = key switch
             {
@@ -2023,7 +2074,7 @@ public partial class MainWindow : Window
         ExitTodoEditMode();
         _tab = TabMode.Agent;
         StyleTabs();
-        // 先占住焦点。Alt+5 随后会收回壳层焦点；时间线加载完还会再抢一次。
+        // 先占住焦点。Ctrl+5 随后会收回壳层焦点；时间线加载完还会再抢一次。
         FocusAgentInputSoon();
         _ = EnterAgentTabAsync();
     }
@@ -2035,18 +2086,80 @@ public partial class MainWindow : Window
         ExitTodoEditMode();
         _tab = TabMode.File;
         StyleTabs();
-        FileSearchBox.Focus();
+        FocusFileSearchSoon();
         RunFileSearch();
     }
 
     private readonly DispatcherTimer _fileSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private bool _fileSearchBusy;
     private bool _fileSearchQueued;
+    private bool _filePickAfterSearch;
+    private bool _filePicking;
+    private int _fileSelected = -1;
+    private string _fileSearchedText = "";
+    private List<EverythingHit> _fileHits = new();
+    private readonly List<DockPanel> _fileRows = new();
+    private static readonly SolidColorBrush FileSelectedBrush = FreezeBrush(System.Windows.Media.Color.FromRgb(0xD6, 0xE8, 0xFF));
 
     private void FileSearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        _filePicking = false;
         _fileSearchTimer.Stop();
         _fileSearchTimer.Start();
+    }
+
+    private void FileSearchBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key is Key.Down or Key.Up)
+        {
+            if (!_filePicking || _fileHits.Count == 0) return;
+            e.Handled = true;
+            MoveFileSelection(e.Key == Key.Down ? 1 : -1);
+            return;
+        }
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        _fileSearchTimer.Stop();
+        var text = FileSearchBox.Text.Trim();
+        if (_fileSearchBusy || !string.Equals(text, _fileSearchedText, StringComparison.Ordinal))
+        {
+            _filePickAfterSearch = true;
+            RunFileSearch();
+            return;
+        }
+        if (_fileHits.Count == 0) return;
+        if (!_filePicking || _fileSelected < 0 || _fileSelected >= _fileHits.Count)
+        {
+            SelectFile(0);
+            return;
+        }
+        OpenEverythingHit(_fileHits[_fileSelected]);
+    }
+
+    private void MoveFileSelection(int delta)
+    {
+        if (_fileHits.Count == 0) return;
+        var next = _fileSelected < 0 ? 0 : _fileSelected + delta;
+        if (next < 0) next = 0;
+        if (next >= _fileHits.Count) next = _fileHits.Count - 1;
+        SelectFile(next);
+    }
+
+    private void SelectFile(int index)
+    {
+        if (index < 0 || index >= _fileRows.Count) return;
+        _filePicking = true;
+        _fileSelected = index;
+        for (var i = 0; i < _fileRows.Count; i++)
+            _fileRows[i].Background = i == index ? FileSelectedBrush : MediaBrushes.Transparent;
+        _fileRows[index].BringIntoView();
+    }
+
+    private static SolidColorBrush FreezeBrush(System.Windows.Media.Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
     }
 
     private void BtnEverythingStart_Click(object sender, RoutedEventArgs e)
@@ -2089,6 +2202,12 @@ public partial class MainWindow : Window
                 RunFileSearchOnce();
             }
             while (_fileSearchQueued);
+            if (_filePickAfterSearch)
+            {
+                _filePickAfterSearch = false;
+                if (_fileHits.Count > 0)
+                    SelectFile(0);
+            }
         }
         finally
         {
@@ -2101,6 +2220,11 @@ public partial class MainWindow : Window
         if (_tab != TabMode.File) return;
         var text = FileSearchBox.Text.Trim();
         FileSearchList.Children.Clear();
+        _fileRows.Clear();
+        _fileHits = new List<EverythingHit>();
+        _fileSelected = -1;
+        _filePicking = false;
+        _fileSearchedText = text;
         if (!EverythingSearch.IsRunning())
         {
             FileSearchHint.Text = EverythingSearch.InstalledExe() == null
@@ -2124,9 +2248,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _fileSearchedText = "";
             FileSearchHint.Text = ShortErr(ex);
             return;
         }
+        _fileHits = hits.ToList();
         FileSearchHint.Text = hits.Count == 0 ? "没有结果" : $"{hits.Count} 条";
         foreach (var hit in hits)
         {
@@ -2166,6 +2292,7 @@ public partial class MainWindow : Window
             row.Children.Add(kind);
             row.Children.Add(textCol);
             row.MouseLeftButtonUp += (_, _) => OpenEverythingHit(capture);
+            _fileRows.Add(row);
             FileSearchList.Children.Add(row);
         }
     }

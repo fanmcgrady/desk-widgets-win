@@ -185,17 +185,17 @@
       <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">
         <Border x:Name="TabNoteBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabNote_Click" Padding="0,0,0,6" ToolTip="主题笔记 · Alt+1">
+                MouseLeftButtonUp="TabNote_Click" Padding="0,0,0,6" ToolTip="主题笔记 · Ctrl+1">
           <TextBlock x:Name="TabNoteText" Text="笔记" FontSize="13"/>
         </Border>
         <Border x:Name="TabTodoBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabTodo_Click" Padding="0,0,0,6" ToolTip="待办事项 · Alt+2">
+                MouseLeftButtonUp="TabTodo_Click" Padding="0,0,0,6" ToolTip="待办事项 · Ctrl+2">
           <TextBlock x:Name="TabTodoText" Text="待办" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
         <Border x:Name="TabMailBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabMail_Click" Padding="0,0,0,6" ToolTip="收发邮件 · Alt+3">
+                MouseLeftButtonUp="TabMail_Click" Padding="0,0,0,6" ToolTip="收发邮件 · Ctrl+3">
           <StackPanel Orientation="Horizontal">
             <TextBlock x:Name="TabMailText" Text="邮件" FontSize="13" Foreground="{StaticResource Muted}"/>
             <Border x:Name="MailTabBadge" Visibility="Collapsed" CornerRadius="8" Height="16"
@@ -208,7 +208,7 @@
         </Border>
         <Border x:Name="TabCyberBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabCyber_Click" Padding="0,0,0,6" ToolTip="网安热点 · Alt+4">
+                MouseLeftButtonUp="TabCyber_Click" Padding="0,0,0,6" ToolTip="网安热点 · Ctrl+4">
           <StackPanel Orientation="Horizontal">
             <TextBlock x:Name="TabCyberText" Text="网安" FontSize="13" Foreground="{StaticResource Muted}"/>
             <Border x:Name="CyberTabBadge" Visibility="Collapsed" CornerRadius="8" Height="16"
@@ -221,12 +221,12 @@
         </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Alt+5 · Alt+空格">
+                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Ctrl+5 · Alt+空格">
           <TextBlock x:Name="TabAgentText" Text="模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
         <Border x:Name="TabFileBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Alt+6">
+                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Ctrl+6">
           <TextBlock x:Name="TabFileText" Text="文件" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
@@ -697,8 +697,9 @@
             <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
                     Padding="10,0">
               <TextBox x:Name="FileSearchBox" Style="{StaticResource PlainInput}" Height="32"
-                       FontSize="13" ToolTip="Everything 语法，例如 *.pdf"
+                       FontSize="13" ToolTip="回车选中第一条，上下移动，再回车打开。例如 *.pdf"
                        TextChanged="FileSearchBox_TextChanged"
+                       PreviewKeyDown="FileSearchBox_PreviewKeyDown"
                        GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
             </Border>
           </DockPanel>
