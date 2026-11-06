@@ -28,9 +28,23 @@ public partial class StartupWatchWindow : Window
             var preview = Environment.GetCommandLineArgs().Any(a =>
                 string.Equals(a, "--preview-startup", StringComparison.OrdinalIgnoreCase));
             if (!preview && !StartupWatch.IsFreshBoot()) return;
-            var items = StartupWatch.LoadEnabledOthers();
-            if (items.Count == 0) return;
-            new StartupWatchWindow(items).Show();
+            // 枚举启动项（注册表 / 任务计划）放到后台，避免卡住侧栏 OnLoaded
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var items = StartupWatch.LoadEnabledOthers();
+                    if (items.Count == 0) return;
+                    var app = System.Windows.Application.Current;
+                    if (app == null) return;
+                    app.Dispatcher.BeginInvoke(() =>
+                    {
+                        try { new StartupWatchWindow(items).Show(); }
+                        catch { /* ignore */ }
+                    });
+                }
+                catch { /* ignore */ }
+            });
         }
         catch { /* 读启动项失败时不挡侧栏 */ }
     }

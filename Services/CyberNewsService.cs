@@ -71,8 +71,8 @@ public sealed class CyberNewsService
         _inboxPath = Path.Combine(dir, "cyber-news-inbox.json");
         _lastFetchPath = Path.Combine(dir, "cyber-news-lastfetch.txt");
         _feedsPath = Path.Combine(dir, "cyber-news-feeds.json");
-        _feeds = LoadFeeds(_feedsPath);
-        SaveFeeds();
+        _feeds = LoadFeeds(_feedsPath, out var feedsDirty);
+        if (feedsDirty) SaveFeeds();
         _readIds = LoadReadIds(_readPath);
         _favorites = LoadFavorites(_favPath);
         _inbox = LoadInbox(_inboxPath);
@@ -537,8 +537,9 @@ public sealed class CyberNewsService
         return text;
     }
 
-    private static List<CyberFeed> LoadFeeds(string path)
+    private static List<CyberFeed> LoadFeeds(string path, out bool dirty)
     {
+        dirty = false;
         try
         {
             if (!File.Exists(path))
@@ -549,13 +550,15 @@ public sealed class CyberNewsService
             }
             var loaded = JsonSerializer.Deserialize<List<CyberFeed>>(File.ReadAllText(path));
             if (loaded == null) return DefaultFeeds.ToList();
-            return loaded
+            var filtered = loaded
                 .Where(f => !string.IsNullOrWhiteSpace(f.Url) && !string.IsNullOrWhiteSpace(f.Label))
                 .Where(f => !f.Url.Contains("schneier.com", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.Url.Contains("lonelysec.com", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.Url.Contains("csdn.net", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.Url.Contains("troyhunt.com", StringComparison.OrdinalIgnoreCase))
                 .ToList();
+            dirty = filtered.Count != loaded.Count;
+            return filtered;
         }
         catch
         {

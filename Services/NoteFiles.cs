@@ -4,7 +4,7 @@ using System.Text;
 
 namespace DeskWidgets.Services;
 
-/// <summary>主题笔记本地文本，可用记事本打开并回写。</summary>
+/// <summary>主题笔记本地 Markdown（.md），可用外部编辑器打开并回写。</summary>
 public sealed class NoteFiles
 {
     private readonly string _dir;
@@ -18,12 +18,26 @@ public sealed class NoteFiles
         Directory.CreateDirectory(_dir);
     }
 
-    public string PathFor(string noteId) => Path.Combine(_dir, noteId + ".txt");
+    public string PathFor(string noteId) => Path.Combine(_dir, noteId + ".md");
+
+    private string LegacyPathFor(string noteId) => Path.Combine(_dir, noteId + ".txt");
 
     public string Read(string noteId)
     {
         var path = PathFor(noteId);
-        if (!File.Exists(path)) return "";
+        if (!File.Exists(path))
+        {
+            var legacy = LegacyPathFor(noteId);
+            if (!File.Exists(legacy)) return "";
+            try
+            {
+                var text = File.ReadAllText(legacy, Encoding.UTF8);
+                // 读到旧 .txt 时迁成 .md，避免两份分叉
+                Write(noteId, text);
+                return text;
+            }
+            catch { return ""; }
+        }
         try { return File.ReadAllText(path, Encoding.UTF8); }
         catch { return ""; }
     }
@@ -31,6 +45,13 @@ public sealed class NoteFiles
     public void Write(string noteId, string body)
     {
         File.WriteAllText(PathFor(noteId), body ?? "", new UTF8Encoding(false));
+        try
+        {
+            var legacy = LegacyPathFor(noteId);
+            if (File.Exists(legacy))
+                File.Delete(legacy);
+        }
+        catch { /* ignore */ }
     }
 
     public void Delete(string noteId)
@@ -39,6 +60,12 @@ public sealed class NoteFiles
         {
             var path = PathFor(noteId);
             if (File.Exists(path)) File.Delete(path);
+        }
+        catch { /* ignore */ }
+        try
+        {
+            var legacy = LegacyPathFor(noteId);
+            if (File.Exists(legacy)) File.Delete(legacy);
         }
         catch { /* ignore */ }
     }
@@ -79,6 +106,10 @@ public sealed class NoteFiles
         {
             var line = raw.Trim();
             if (line.Length == 0) continue;
+            // 标题行常见写法：# 标题
+            if (line.StartsWith('#'))
+                line = line.TrimStart('#').Trim();
+            if (line.Length == 0) continue;
             return line.Length > 24 ? line[..24] + "…" : line;
         }
         return "未命名笔记";
@@ -96,6 +127,8 @@ public sealed class NoteFiles
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 title = line.Trim();
+                if (title.StartsWith('#'))
+                    title = title.TrimStart('#').Trim();
             }
             else rest.Add(line);
         }
@@ -103,7 +136,7 @@ public sealed class NoteFiles
             rest.RemoveAt(0);
         while (rest.Count > 0 && string.IsNullOrWhiteSpace(rest[^1]))
             rest.RemoveAt(rest.Count - 1);
-        return (title ?? "未命名", string.Join("\n", rest));
+        return (string.IsNullOrWhiteSpace(title) ? "未命名" : title, string.Join("\n", rest));
     }
 
     public static string JoinTitleBody(string title, string? body)

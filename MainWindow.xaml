@@ -221,12 +221,12 @@
         </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Ctrl+5 · Alt+空格">
+                MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Ctrl+5 · Ctrl+空格">
           <TextBlock x:Name="TabAgentText" Text="模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
         <Border x:Name="TabFileBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Ctrl+6">
+                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Ctrl+6 · Alt+空格">
           <TextBlock x:Name="TabFileText" Text="文件" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
@@ -440,11 +440,24 @@
           </Grid>
         </DockPanel>
 
-        <!-- 笔记 -->
+        <!-- 笔记（Markdown 源码编辑 + 预览） -->
         <DockPanel x:Name="NotePanel">
           <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" Height="24">
             <Button Content="+ 新建" Foreground="{StaticResource Accent}" FontSize="12"
                     Click="BtnNewNote_Click"/>
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
+              <Border x:Name="NoteModeEdit" BorderThickness="0,0,0,2" BorderBrush="{StaticResource Accent}"
+                      Margin="0,0,10,0" Cursor="Hand" Padding="0,0,0,3"
+                      MouseLeftButtonUp="NoteModeEdit_Click">
+                <TextBlock x:Name="NoteModeEditText" Text="编辑" FontSize="12"/>
+              </Border>
+              <Border x:Name="NoteModePreview" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                      Cursor="Hand" Padding="0,0,0,3"
+                      MouseLeftButtonUp="NoteModePreview_Click">
+                <TextBlock x:Name="NoteModePreviewText" Text="预览" FontSize="12"
+                           Foreground="{StaticResource Muted}"/>
+              </Border>
+            </StackPanel>
             <Button x:Name="BtnAddTodoFromNote" Content="加入待办"
                     HorizontalAlignment="Right"
                     Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
@@ -461,14 +474,19 @@
                   Click="BtnNotepad_Click"/>
           <Border Background="White" CornerRadius="8" Padding="10,8"
                   BorderBrush="#10000000" BorderThickness="1">
-            <TextBox x:Name="NoteEdit"
-                     AcceptsReturn="True" TextWrapping="Wrap"
-                     VerticalScrollBarVisibility="Auto"
-                     BorderThickness="0" Background="Transparent"
-                     FontSize="15.5" Padding="0"
-                     GotKeyboardFocus="Input_GotFocus"
-                     LostKeyboardFocus="Input_LostFocus"
-                     TextChanged="NoteEdit_TextChanged"/>
+            <Grid>
+              <TextBox x:Name="NoteEdit"
+                       AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap"
+                       VerticalScrollBarVisibility="Auto"
+                       BorderThickness="0" Background="Transparent"
+                       FontSize="15.5" Padding="0"
+                       GotKeyboardFocus="Input_GotFocus"
+                       LostKeyboardFocus="Input_LostFocus"
+                       TextChanged="NoteEdit_TextChanged"
+                       ToolTip="支持 Markdown：标题、列表、链接、代码块等"/>
+              <wv2:WebView2 x:Name="NotePreview" Visibility="Collapsed"
+                            DefaultBackgroundColor="White"/>
+            </Grid>
           </Border>
         </DockPanel>
 
@@ -736,7 +754,7 @@
                        AcceptsReturn="False" TextWrapping="Wrap"
                        FontSize="13" MinHeight="22" MaxHeight="88"
                        VerticalScrollBarVisibility="Auto"
-                       ToolTip="Alt+空格 聚焦 · Enter 发送 · Shift+Enter 换行"
+                       ToolTip="Ctrl+空格 聚焦 · Enter 发送 · Shift+Enter 换行"
                        GotKeyboardFocus="Input_GotFocus"
                        LostKeyboardFocus="Input_LostFocus"
                        PreviewKeyDown="AgentInput_PreviewKeyDown"/>

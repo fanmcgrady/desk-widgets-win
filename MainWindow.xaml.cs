@@ -100,14 +100,19 @@ public partial class MainWindow : Window
     private DateTime _ctrlDownUtc = DateTime.MinValue;
     private DateTime _lastCtrlTapUtc = DateTime.MinValue;
     private bool _altSpaceHeld;
-    /// <summary>按下 Alt+空格 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
+    private bool _ctrlSpaceHeld;
+    /// <summary>按下 Ctrl+空格 后的一小段时间内，壳层抢焦点要改把焦点放进大模型输入框。</summary>
     private DateTime _agentFocusRequestedUtc = DateTime.MinValue;
     private DispatcherTimer? _agentFocusTimer;
     private int _agentFocusTicks;
     private bool _agentFocusBusy;
     private bool _agentFocusHooked;
+    private DateTime _fileFocusRequestedUtc = DateTime.MinValue;
+    private DispatcherTimer? _fileFocusTimer;
+    private int _fileFocusTicks;
+    private bool _fileFocusBusy;
 
-    // 全局唤醒：连按两下 Ctrl；消失：Esc；大模型：Alt+空格；展开时 Ctrl+1..6 用 RegisterHotKey
+    // 全局唤醒：连按两下 Ctrl；消失：Esc；文件：Alt+空格；大模型：Ctrl+空格；展开时 Ctrl+1..6 用 RegisterHotKey
     private const int HotkeyIdTabBase = 0xD510; // +1..+6
     private const uint ModControl = 0x0002;
     private const uint ModNoRepeat = 0x4000;
@@ -177,6 +182,9 @@ public partial class MainWindow : Window
     private string? _editingTodoId; // 从待办「编辑」进入时，笔记区改的是这条待办
     private bool _noteLoading;
     private bool _noteWriting;
+    private bool _notePreviewMode;
+    private bool _notePreviewReady;
+    private bool _notePreviewHooksBound;
     private DispatcherTimer? _noteSaveTimer;
     private DispatcherTimer? _noteReloadDebounce;
     // 待办拖拽排序
@@ -217,10 +225,10 @@ public partial class MainWindow : Window
         _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
         _cyberPollTimer.Tick += async (_, _) => await PollCyberNewsAsync(silent: true);
 
-        _fileSearchTimer.Tick += (_, _) =>
+        _fileSearchTimer.Tick += async (_, _) =>
         {
             _fileSearchTimer.Stop();
-            RunFileSearch();
+            await RunFileSearchAsync();
         };
 
         Loaded += OnLoaded;
@@ -234,7 +242,6 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        Autostart.ApplyPreferred(); // 默认开机自启；托盘可关，并记住选择
         SetupTray();
         StyleTabs();
         UpdatePinButton();
@@ -249,28 +256,34 @@ public partial class MainWindow : Window
         UpdateNoteChrome();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _dockScreen = PickDefaultDockScreen();
-        // 先装钩子/热键，再展开并清掉 NoteEdit 焦点，否则首次 Ctrl+数字会被输入框吃掉
+        // 先装钩子/热键，再直接收起。托盘、左缘、双击 Ctrl 再展开。
         RegisterWakeHotkey();
-        Expand();
-        ScheduleShellFocusReclaim();
+        _expanded = false;
+        PlaceCollapsed();
+        SyncEdgeTimerInterval();
         Activated += (_, _) => { if (_expanded) RegisterTabHotkeys(); };
         Deactivated += (_, _) => UnregisterTabHotkeys();
         _edgeTimer.Start();
         _syncTimer.Start();
         _mailPollTimer.Start();
         _cyberPollTimer.Start();
-        _ = PollMailUnreadAsync(silent: true);
         UpdateCyberBadge();
-        _ = PollCyberNewsAsync(silent: true);
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            try { Autostart.ApplyPreferred(); } catch { /* ignore */ }
+        }, DispatcherPriority.ContextIdle);
+
         StartupWatchWindow.ShowIfFreshBoot();
 
-        var hide = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
-        hide.Tick += (_, _) =>
+        var deferred = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+        deferred.Tick += async (_, _) =>
         {
-            hide.Stop();
-            if (!_inputFocused) Collapse();
+            deferred.Stop();
+            _ = PollMailUnreadAsync(silent: true);
+            await PollCyberNewsAsync(silent: true);
         };
-        hide.Start();
+        deferred.Start();
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -622,6 +635,7 @@ public partial class MainWindow : Window
         Activate();
         Topmost = true;
         RegisterTabHotkeys();
+        SyncEdgeTimerInterval();
         // 首次/每次展开都清输入焦点，保证 Ctrl+数字走热键而不是进 NoteEdit
         ScheduleShellFocusReclaim();
     }
@@ -721,6 +735,7 @@ public partial class MainWindow : Window
         _ctrlChorded = false;
         _lastCtrlTapUtc = DateTime.MinValue;
         _altSpaceHeld = false;
+        _ctrlSpaceHeld = false;
     }
 
     private void InstallMouseHook()
@@ -747,7 +762,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 鼠标侧键回退。WebView 会自己当成浏览器后退，所以在钩子里吞掉：
-    /// 网安页改为下一篇；阅读邮件时返回列表。
+    /// 笔记页打开记事本；网安页下一篇；阅读邮件时返回列表。
     /// </summary>
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
@@ -760,6 +775,12 @@ public partial class MainWindow : Window
                 var button = (info.MouseData >> 16) & 0xFFFF;
                 if (button == MouseXButton1 && _expanded && IsOurWindowForeground())
                 {
+                    if (_tab == TabMode.Note)
+                    {
+                        if (msg == WmXButtonDown)
+                            _ = Dispatcher.BeginInvoke(() => BtnNotepad_Click(this, new RoutedEventArgs()));
+                        return (IntPtr)1;
+                    }
                     if (_tab == TabMode.Cyber)
                     {
                         if (msg == WmXButtonDown)
@@ -793,7 +814,7 @@ public partial class MainWindow : Window
     /// 键盘钩子约定：
     /// - 侧栏展开且本窗（含 WebView 子 HWND）在前台：Esc 收起 / Ctrl+1..6 / F1 / 网安←→↑↓空格 由钩子吞掉并处理
     ///   （PreviewKeyDown 仅作钩子未装上时的后备）
-    /// - 全局：Ctrl 连按两下唤醒侧栏；Alt+空格打开大模型（吞掉，避免系统菜单一起弹出）
+    /// - 全局：Ctrl 连按两下唤醒侧栏；Alt+空格打开文件；Ctrl+空格打开大模型
     /// </summary>
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
@@ -805,7 +826,8 @@ public partial class MainWindow : Window
             var down = msg is WmKeyDown or WmSysKeyDown;
             var up = msg is WmKeyUp or WmSysKeyUp;
 
-            // Alt+空格是系统菜单键，必须在钩子里吞掉，否则会先弹出窗口菜单。
+            // Alt+空格是系统菜单键，必须吞掉。现用来打开文件页。
+            // Ctrl+空格打开大模型，同样吞掉，避免输入框吃掉空格。
             if (info.VkCode == VkSpace && (info.Flags & LlKhfInjected) == 0)
             {
                 if (down && IsAltSpaceChord())
@@ -813,13 +835,28 @@ public partial class MainWindow : Window
                     if (!_altSpaceHeld)
                     {
                         _altSpaceHeld = true;
-                        Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+                        Dispatcher.BeginInvoke(FocusFileSearchFromHotkey);
                     }
                     return (IntPtr)1;
                 }
                 if (up && _altSpaceHeld)
                 {
                     _altSpaceHeld = false;
+                    return (IntPtr)1;
+                }
+                if (down && IsCtrlSpaceChord())
+                {
+                    if (!_ctrlSpaceHeld)
+                    {
+                        _ctrlSpaceHeld = true;
+                        if (_ctrlHeld) _ctrlChorded = true;
+                        Dispatcher.BeginInvoke(FocusAgentInputFromHotkey);
+                    }
+                    return (IntPtr)1;
+                }
+                if (up && _ctrlSpaceHeld)
+                {
+                    _ctrlSpaceHeld = false;
                     return (IntPtr)1;
                 }
             }
@@ -887,12 +924,18 @@ public partial class MainWindow : Window
     /// <summary>Alt 按下、Ctrl/Shift 都没按下。左右 Alt 都算。</summary>
     private static bool IsAltSpaceChord()
     {
-        var altDown = (GetAsyncKeyState((int)VkMenu) & 0x8000) != 0
-                      || (GetAsyncKeyState(0xA4) & 0x8000) != 0
-                      || (GetAsyncKeyState(0xA5) & 0x8000) != 0;
-        if (!altDown) return false;
-        if ((GetAsyncKeyState((int)VkControl) & 0x8000) != 0) return false;
-        if ((GetAsyncKeyState((int)VkShift) & 0x8000) != 0) return false;
+        if (!IsAltDown()) return false;
+        if (IsCtrlDown()) return false;
+        if (IsShiftDown()) return false;
+        return true;
+    }
+
+    /// <summary>Ctrl 按下、Alt/Shift 都没按下。</summary>
+    private static bool IsCtrlSpaceChord()
+    {
+        if (!IsCtrlDown()) return false;
+        if (IsAltDown()) return false;
+        if (IsShiftDown()) return false;
         return true;
     }
 
@@ -999,12 +1042,13 @@ public partial class MainWindow : Window
         if (_keyboardHookInstalled)
         {
             parts.Add("连按两下 Ctrl");
-            parts.Add("Alt+空格 大模型");
+            parts.Add("Alt+空格 文件");
+            parts.Add("Ctrl+空格 大模型");
         }
         _tray.Text = string.Join(" · ", parts);
     }
 
-    /// <summary>全局：Alt+空格，展开侧栏并切到大模型输入框。</summary>
+    /// <summary>全局：Ctrl+空格，展开侧栏并切到大模型输入框。</summary>
     private void FocusAgentInputFromHotkey()
     {
         _agentFocusRequestedUtc = DateTime.UtcNow;
@@ -1018,45 +1062,95 @@ public partial class MainWindow : Window
         FocusAgentInputSoon();
     }
 
+    /// <summary>全局：Alt+空格，展开侧栏并切到文件搜索框。</summary>
+    private void FocusFileSearchFromHotkey()
+    {
+        _fileFocusRequestedUtc = DateTime.UtcNow;
+        if (!_expanded) ExpandFromTray();
+        else
+        {
+            Activate();
+            Topmost = true;
+        }
+        InvokeTabClick(TabFile_Click);
+        FocusFileSearchSoon();
+    }
+
     private bool ShouldKeepAgentInputFocus() =>
         _expanded
         && _tab == TabMode.Agent
         && DateTime.UtcNow - _agentFocusRequestedUtc < TimeSpan.FromSeconds(2);
-
-    private DateTime _fileFocusRequestedUtc;
 
     private bool ShouldKeepFileInputFocus() =>
         _expanded
         && _tab == TabMode.File
         && DateTime.UtcNow - _fileFocusRequestedUtc < TimeSpan.FromSeconds(2);
 
-    /// <summary>Ctrl+6 切过来之后还会收回壳层焦点，所以立刻和稍后各放一次。</summary>
+    /// <summary>
+    /// Alt+空格从别的程序唤起时，Activate 拿不到前台；Alt 还按着时菜单态也会把焦点打掉。
+    /// 所以跟大模型一样抢前台，并在松 Alt 后再多补几次。
+    /// </summary>
     private void FocusFileSearchSoon()
     {
         _fileFocusRequestedUtc = DateTime.UtcNow;
+        _fileFocusTicks = 8;
         FocusFileSearchCore();
         Dispatcher.BeginInvoke(FocusFileSearchCore, DispatcherPriority.Input);
         Dispatcher.BeginInvoke(FocusFileSearchCore, DispatcherPriority.ContextIdle);
+        Dispatcher.BeginInvoke(FocusFileSearchCore, DispatcherPriority.ApplicationIdle);
+        if (_fileFocusTimer == null)
+        {
+            _fileFocusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
+            _fileFocusTimer.Tick += (_, _) =>
+            {
+                // Alt 还按着时焦点经常粘不住，松手后再放
+                if (IsAltDown())
+                {
+                    FocusFileSearchCore();
+                    return;
+                }
+                if (FileSearchBox.IsKeyboardFocused || --_fileFocusTicks <= 0)
+                {
+                    _fileFocusTimer?.Stop();
+                    return;
+                }
+                FocusFileSearchCore();
+            };
+        }
+        _fileFocusTimer.Stop();
+        _fileFocusTimer.Start();
     }
 
     private void FocusFileSearchCore()
     {
-        if (!ShouldKeepFileInputFocus()) return;
+        if (!ShouldKeepFileInputFocus() || _fileFocusBusy) return;
+        _fileFocusBusy = true;
         try
         {
+            ForceOurWindowForeground();
             FileSearchBox.Focusable = true;
             FocusManager.SetFocusedElement(this, FileSearchBox);
             Keyboard.Focus(FileSearchBox);
             FileSearchBox.Focus();
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+                SetFocus(hwnd);
+            Keyboard.Focus(FileSearchBox);
+            if (!FileSearchBox.IsKeyboardFocused)
+                FileSearchBox.Focus();
         }
         catch { /* ignore */ }
+        finally
+        {
+            _fileFocusBusy = false;
+        }
     }
 
     /// <summary>WebView 子窗会在页签切过来之后把键盘焦点抢走，所以多补几次。</summary>
     private void FocusAgentInputSoon()
     {
         _agentFocusRequestedUtc = DateTime.UtcNow;
-        _agentFocusTicks = 10;
+        _agentFocusTicks = 4;
         EnsureAgentFocusHooks();
         FocusAgentInputCore();
         Dispatcher.BeginInvoke(FocusAgentInputCore, DispatcherPriority.Input);
@@ -1067,8 +1161,11 @@ public partial class MainWindow : Window
             _agentFocusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             _agentFocusTimer.Tick += (_, _) =>
             {
-                if (--_agentFocusTicks <= 0)
+                if (AgentInput.IsKeyboardFocused || --_agentFocusTicks <= 0)
+                {
                     _agentFocusTimer?.Stop();
+                    return;
+                }
                 FocusAgentInputCore();
             };
         }
@@ -1209,6 +1306,16 @@ public partial class MainWindow : Window
         _leaveSince = null;
         _awaitPanelEnter = false;
         PlaceCollapsed();
+        SyncEdgeTimerInterval();
+    }
+
+    /// <summary>收起 150ms、钉住 200ms、展开未钉 80ms。</summary>
+    private void SyncEdgeTimerInterval()
+    {
+        var ms = !_expanded ? 150 : _pinned ? 200 : 80;
+        var want = TimeSpan.FromMilliseconds(ms);
+        if (_edgeTimer.Interval != want)
+            _edgeTimer.Interval = want;
     }
 
     /// <summary>仅在侧栏展开且前台时注册，避免全局抢走其它程序的 Ctrl+数字。</summary>
@@ -1247,6 +1354,7 @@ public partial class MainWindow : Window
         {
             _pinned = false;
             UpdatePinButton();
+            SyncEdgeTimerInterval();
             return;
         }
 
@@ -1260,6 +1368,7 @@ public partial class MainWindow : Window
             Activate();
         }
         UpdatePinButton();
+        SyncEdgeTimerInterval();
     }
 
     private void UpdatePinButton()
@@ -1277,6 +1386,7 @@ public partial class MainWindow : Window
 
     private void EdgeTimer_Tick(object? sender, EventArgs e)
     {
+        SyncEdgeTimerInterval();
         var mouse = WinForms.Control.MousePosition; // 物理像素
         var edgeScreen = ScreenNearLeftEdge(mouse);
         var dockLocked = IsDockLocked();
@@ -1312,6 +1422,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 钉住本来就不收，不必每拍算 DPI / 宽度
+        if (_pinned)
+        {
+            _leaveSince = null;
+            return;
+        }
+
         var screen = ResolveScreen(_dockScreen)
                      ?? WinForms.Screen.PrimaryScreen
                      ?? PickDefaultDockScreen();
@@ -1325,12 +1442,6 @@ public partial class MainWindow : Window
                         && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
         bool inPanel = mouse.X >= wa.Left && mouse.X <= wa.Left + widthPx
                        && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
-
-        if (_pinned)
-        {
-            _leaveSince = null;
-            return;
-        }
 
         if (_awaitPanelEnter)
         {
@@ -1388,6 +1499,14 @@ public partial class MainWindow : Window
         if (key == Key.Space
             && (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt
             && (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == ModifierKeys.None)
+        {
+            FocusFileSearchFromHotkey();
+            e.Handled = true;
+            return;
+        }
+        if (key == Key.Space
+            && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && (Keyboard.Modifiers & (ModifierKeys.Alt | ModifierKeys.Shift)) == ModifierKeys.None)
         {
             FocusAgentInputFromHotkey();
             e.Handled = true;
@@ -1567,7 +1686,8 @@ public partial class MainWindow : Window
             menu.Items.Add(item);
         }
         AddItem("展开侧栏\t连按两下 Ctrl", (_, _) => Dispatcher.Invoke(WakeFromHotkey));
-        AddItem("大模型输入\tAlt+空格", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
+        AddItem("文件搜索\tAlt+空格", (_, _) => Dispatcher.Invoke(FocusFileSearchFromHotkey));
+        AddItem("大模型输入\tCtrl+空格", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
         AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
         menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
         AddItem("登录并同步", async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
@@ -2087,7 +2207,7 @@ public partial class MainWindow : Window
         _tab = TabMode.File;
         StyleTabs();
         FocusFileSearchSoon();
-        RunFileSearch();
+        _ = RunFileSearchAsync();
     }
 
     private readonly DispatcherTimer _fileSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
@@ -2112,9 +2232,13 @@ public partial class MainWindow : Window
     {
         if (e.Key is Key.Down or Key.Up)
         {
-            if (!_filePicking || _fileHits.Count == 0) return;
+            if (_fileHits.Count == 0) return;
             e.Handled = true;
-            MoveFileSelection(e.Key == Key.Down ? 1 : -1);
+            // 结果已实时列出，方向键直接进入选中，不必先回车
+            if (!_filePicking || _fileSelected < 0)
+                SelectFile(e.Key == Key.Down ? 0 : _fileHits.Count - 1);
+            else
+                MoveFileSelection(e.Key == Key.Down ? 1 : -1);
             return;
         }
         if (e.Key != Key.Enter) return;
@@ -2124,16 +2248,13 @@ public partial class MainWindow : Window
         if (_fileSearchBusy || !string.Equals(text, _fileSearchedText, StringComparison.Ordinal))
         {
             _filePickAfterSearch = true;
-            RunFileSearch();
+            _ = RunFileSearchAsync();
             return;
         }
         if (_fileHits.Count == 0) return;
         if (!_filePicking || _fileSelected < 0 || _fileSelected >= _fileHits.Count)
-        {
             SelectFile(0);
-            return;
-        }
-        OpenEverythingHit(_fileHits[_fileSelected]);
+        OpenEverythingHitAndCollapse(_fileHits[_fileSelected]);
     }
 
     private void MoveFileSelection(int delta)
@@ -2180,13 +2301,13 @@ public partial class MainWindow : Window
             {
                 wait.Stop();
                 BtnEverythingStart.IsEnabled = true;
-                RunFileSearch();
+                _ = RunFileSearchAsync();
             }
         };
         wait.Start();
     }
 
-    private void RunFileSearch()
+    private async Task RunFileSearchAsync()
     {
         if (_fileSearchBusy)
         {
@@ -2199,14 +2320,17 @@ public partial class MainWindow : Window
             do
             {
                 _fileSearchQueued = false;
-                RunFileSearchOnce();
+                await RunFileSearchOnceAsync();
             }
             while (_fileSearchQueued);
             if (_filePickAfterSearch)
             {
                 _filePickAfterSearch = false;
                 if (_fileHits.Count > 0)
+                {
                     SelectFile(0);
+                    OpenEverythingHitAndCollapse(_fileHits[0]);
+                }
             }
         }
         finally
@@ -2215,7 +2339,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RunFileSearchOnce()
+    private async Task RunFileSearchOnceAsync()
     {
         if (_tab != TabMode.File) return;
         var text = FileSearchBox.Text.Trim();
@@ -2244,7 +2368,7 @@ public partial class MainWindow : Window
         IReadOnlyList<EverythingHit> hits;
         try
         {
-            hits = EverythingSearch.Query(text);
+            hits = await Task.Run(() => EverythingSearch.Query(text));
         }
         catch (Exception ex)
         {
@@ -2252,6 +2376,9 @@ public partial class MainWindow : Window
             FileSearchHint.Text = ShortErr(ex);
             return;
         }
+        if (_tab != TabMode.File) return;
+        if (!string.Equals(text, FileSearchBox.Text.Trim(), StringComparison.Ordinal))
+            return;
         _fileHits = hits.ToList();
         FileSearchHint.Text = hits.Count == 0 ? "没有结果" : $"{hits.Count} 条";
         foreach (var hit in hits)
@@ -2309,6 +2436,20 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>回车打开选中项后收起侧栏，把前台让给打开的文件/目录。</summary>
+    private void OpenEverythingHitAndCollapse(EverythingHit hit)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(hit.FullPath) { UseShellExecute = true });
+            Collapse();
+        }
+        catch (Exception ex)
+        {
+            FileSearchHint.Text = ShortErr(ex);
+        }
+    }
+
     private void TabCyber_Click(object sender, MouseButtonEventArgs e)
     {
         FlushNoteSave();
@@ -2325,7 +2466,6 @@ public partial class MainWindow : Window
         // 进网安页强制满屏重定位（避免沿用其它页签的 560 宽）
         _lastPlaceX = int.MinValue;
         if (_expanded) PlaceExpanded();
-        _ = EnsureCyberWebAsync();
         ScheduleShellFocusReclaim(when: () => _tab == TabMode.Cyber);
 
         if (_cyberListMode == CyberListMode.Sources)
@@ -2339,6 +2479,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 热点才初始化主 WebView；预载实例留给 PrefetchNextCyberNews
+        _ = EnsureCyberWebAsync();
         await ShowCyberHotFromCacheThenMaybeFetchAsync();
         TryOpenFirstCyberNewsIfEmpty();
     }
@@ -2348,7 +2490,8 @@ public partial class MainWindow : Window
         AgentStatus.Text = "加载时间线…";
         await EnsureAgentTimelineAsync();
         await EnsureAgentWelcomeAsync();
-        FocusAgentInputSoon();
+        if (!AgentInput.IsKeyboardFocused)
+            FocusAgentInputSoon();
     }
 
     // ----- 邮件（IMAP/SMTP，默认 mail.scu.edu.cn） -----
@@ -3366,7 +3509,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            await _cyberNews.RefreshAsync(force: true);
+            // 静默/整点遵守拉取间隔；手动刷新走 RefreshCyberNewsAsync(force: true)
+            await _cyberNews.RefreshAsync(force: false);
             UpdateCyberBadge();
             // 停留在热点页时刷新列表（手动/整点共用）
             if (_tab == TabMode.Cyber && _cyberListMode == CyberListMode.Hot
@@ -3737,7 +3881,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await EnsureCyberWebAsync();
+            await EnsureOneCyberWebAsync(CyberNewsWebPrefetch, isPrefetch: true);
             if (epoch != _cyberPrefetchEpoch) return;
             var web = CyberPrefetchWeb;
             if (web.CoreWebView2 == null) return;
@@ -3811,10 +3955,10 @@ public partial class MainWindow : Window
         OpenCyberNewsDetail(favs[idx + 1], dismissFromHot: false);
     }
 
+    /// <summary>只初始化主阅读 WebView；预载实例由 PrefetchNextCyberNews 单独拉起。</summary>
     private async Task EnsureCyberWebAsync()
     {
         await EnsureOneCyberWebAsync(CyberNewsWeb, isPrefetch: false);
-        await EnsureOneCyberWebAsync(CyberNewsWebPrefetch, isPrefetch: true);
     }
 
     private async Task EnsureOneCyberWebAsync(Microsoft.Web.WebView2.Wpf.WebView2 web, bool isPrefetch)
@@ -5012,6 +5156,7 @@ public partial class MainWindow : Window
         _noteLoading = true;
         NoteEdit.Text = NoteFiles.JoinTitleBody(todo.Title, todo.Body);
         _noteLoading = false;
+        if (_notePreviewMode) _ = SetNotePreviewModeAsync(false);
         NoteEdit.Focus();
         NoteEdit.CaretIndex = NoteEdit.Text?.Length ?? 0;
 
@@ -5181,6 +5326,7 @@ public partial class MainWindow : Window
             _noteLoading = true;
             NoteEdit.Text = "";
             _noteLoading = false;
+            if (_notePreviewMode) _ = RefreshNotePreviewAsync();
             return;
         }
 
@@ -5194,6 +5340,7 @@ public partial class MainWindow : Window
         _noteLoading = true;
         NoteEdit.Text = body;
         _noteLoading = false;
+        if (_notePreviewMode) _ = RefreshNotePreviewAsync();
     }
 
     private void BtnNotepad_Click(object sender, RoutedEventArgs e)
@@ -5204,12 +5351,15 @@ public partial class MainWindow : Window
             var fid = TodoEditFileId(_editingTodoId);
             _notes.OpenInNotepad(fid, NoteEdit.Text);
             AttachNoteWatcher(fid); // 仅记事本外部编辑时监视
+            Collapse();
             return;
         }
         if (_activeNoteId == null) EnsureActiveNote();
         if (_activeNoteId == null) return;
         _notes.OpenInNotepad(_activeNoteId, NoteEdit.Text);
         AttachNoteWatcher(_activeNoteId);
+        // 与 Esc 一样收起，把前台让给记事本
+        Collapse();
     }
 
     private void NoteEdit_TextChanged(object sender, TextChangedEventArgs e)
@@ -5221,6 +5371,134 @@ public partial class MainWindow : Window
         _noteSaveTimer.Tick += NoteSaveTick;
         _noteSaveTimer.Start();
     }
+
+    private void NoteModeEdit_Click(object sender, MouseButtonEventArgs e)
+    {
+        _ = SetNotePreviewModeAsync(false);
+    }
+
+    private void NoteModePreview_Click(object sender, MouseButtonEventArgs e)
+    {
+        _ = SetNotePreviewModeAsync(true);
+    }
+
+    private void StyleNoteModeTabs()
+    {
+        var accent = (MediaBrush)FindResource("Accent");
+        var muted = (MediaBrush)FindResource("Muted");
+        var fg = (MediaBrush)FindResource("Fg");
+        NoteModeEdit.BorderBrush = _notePreviewMode ? MediaBrushes.Transparent : accent;
+        NoteModePreview.BorderBrush = _notePreviewMode ? accent : MediaBrushes.Transparent;
+        NoteModeEditText.Foreground = _notePreviewMode ? muted : fg;
+        NoteModePreviewText.Foreground = _notePreviewMode ? fg : muted;
+    }
+
+    private async Task SetNotePreviewModeAsync(bool preview)
+    {
+        if (preview == _notePreviewMode && preview)
+        {
+            await RefreshNotePreviewAsync();
+            return;
+        }
+        _notePreviewMode = preview;
+        StyleNoteModeTabs();
+        if (!preview)
+        {
+            NotePreview.Visibility = Visibility.Collapsed;
+            NoteEdit.Visibility = Visibility.Visible;
+            NoteEdit.Focus();
+            return;
+        }
+
+        FlushNoteSave();
+        NoteEdit.Visibility = Visibility.Collapsed;
+        _inputFocused = false;
+        try
+        {
+            await RefreshNotePreviewAsync();
+            NotePreview.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            _notePreviewMode = false;
+            StyleNoteModeTabs();
+            NoteEdit.Visibility = Visibility.Visible;
+            NotePreview.Visibility = Visibility.Collapsed;
+            NoteEdit.Focus();
+            System.Diagnostics.Debug.WriteLine("Note preview: " + ShortErr(ex));
+        }
+    }
+
+    private async Task RefreshNotePreviewAsync()
+    {
+        await EnsureNotePreviewAsync();
+        if (NotePreview.CoreWebView2 == null)
+            throw new InvalidOperationException("WebView2 初始化失败");
+        var md = NoteEdit.Text ?? "";
+        var body = string.IsNullOrWhiteSpace(md)
+            ? "<p style=\"color:#8A8A8A\">空笔记</p>"
+            : AgentMarkdownToHtml(md);
+        NotePreview.NavigateToString(WrapNoteMarkdownHtml(body));
+    }
+
+    private async Task EnsureNotePreviewAsync()
+    {
+        if (_notePreviewReady && NotePreview.CoreWebView2 != null) return;
+        await NotePreview.EnsureCoreWebView2Async();
+        if (NotePreview.CoreWebView2 == null)
+            throw new InvalidOperationException("WebView2 初始化失败");
+        var settings = NotePreview.CoreWebView2.Settings;
+        settings.IsStatusBarEnabled = false;
+        settings.AreDevToolsEnabled = false;
+        settings.AreDefaultContextMenusEnabled = false;
+        settings.IsZoomControlEnabled = false;
+        if (!_notePreviewHooksBound)
+        {
+            _notePreviewHooksBound = true;
+            NotePreview.CoreWebView2.NavigationStarting += NotePreview_NavigationStarting;
+            NotePreview.CoreWebView2.NewWindowRequested += (_, e) =>
+            {
+                e.Handled = true;
+                if (IsHttpOrHttps(e.Uri))
+                    OpenExternalUrl(e.Uri);
+            };
+        }
+        _notePreviewReady = true;
+    }
+
+    private void NotePreview_NavigationStarting(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs e)
+    {
+        var uri = e.Uri ?? "";
+        if (uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrEmpty(uri))
+            return;
+        e.Cancel = true;
+        if (IsHttpOrHttps(uri))
+            OpenExternalUrl(uri);
+    }
+
+    private static string WrapNoteMarkdownHtml(string bodyHtml) =>
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>" +
+        "<style>" +
+        "html,body{margin:0;padding:0;background:#fff;}" +
+        "body{font-family:\"Microsoft YaHei UI\",Segoe UI,sans-serif;font-size:15px;" +
+        "line-height:1.55;color:#1a1a1a;padding:2px 4px;}" +
+        "h1,h2,h3,h4{margin:0.8em 0 0.35em;line-height:1.3;font-weight:600;}" +
+        "h1{font-size:1.35em;}h2{font-size:1.2em;}h3{font-size:1.08em;}" +
+        "p{margin:0 0 0.65em;}ul,ol{margin:0.2em 0 0.65em;padding-left:1.35em;}" +
+        "li{margin:0.15em 0;}blockquote{margin:0.4em 0;padding:0.2em 0.8em;" +
+        "border-left:3px solid #D0D0D5;color:#555;}" +
+        "code{font-family:Cascadia Mono,Consolas,monospace;font-size:0.92em;" +
+        "background:#F3F3F5;padding:0.1em 0.35em;border-radius:4px;}" +
+        "pre{background:#F3F3F5;padding:10px 12px;border-radius:8px;overflow:auto;}" +
+        "pre code{background:transparent;padding:0;}" +
+        "a{color:#2563EB;text-decoration:none;}a:hover{text-decoration:underline;}" +
+        "table{border-collapse:collapse;margin:0.5em 0;}th,td{border:1px solid #E5E5EA;" +
+        "padding:4px 8px;}th{background:#F7F7F9;}" +
+        "hr{border:none;border-top:1px solid #E5E5EA;margin:1em 0;}" +
+        "img{max-width:100%;}" +
+        "</style></head><body>" + bodyHtml + "</body></html>";
 
     private void NoteSaveTick(object? sender, EventArgs e)
     {
@@ -5314,6 +5592,7 @@ public partial class MainWindow : Window
         NoteEdit.Text = text;
         _noteLoading = false;
         NoteEdit.CaretIndex = Math.Clamp(caret, 0, NoteEdit.Text?.Length ?? 0);
+        if (_notePreviewMode) _ = RefreshNotePreviewAsync();
         FlushNoteSave();
     }
 

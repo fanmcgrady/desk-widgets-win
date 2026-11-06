@@ -16,7 +16,11 @@ public static class EverythingSearch
     private const uint SmtoAbortIfHung = 0x0002;
     private const int MaxResults = 100;
 
+    private static readonly object Gate = new();
+    private static Thread? _sta;
     private static ReplyWindow? _reply;
+    private static ManualResetEventSlim? _ready;
+    private static ManualResetEventSlim? _replied;
 
     public static bool IsRunning() => FindIpcWindow() != IntPtr.Zero;
 
@@ -53,57 +57,92 @@ public static class EverythingSearch
         if (ipc == IntPtr.Zero)
             throw new InvalidOperationException("Everything 没在运行");
 
-        _reply ??= new ReplyWindow();
-        _reply.Ensure();
-        _reply.Hits = new List<EverythingHit>();
-        _reply.GotReply = false;
+        lock (Gate)
+        {
+            EnsureSta();
+            if (_reply == null || _replied == null)
+                throw new InvalidOperationException("查询窗口没起来");
 
-        var chars = text.Length;
-        var size = 20 + (chars + 1) * 2;
-        var query = Marshal.AllocHGlobal(size);
-        var cdsMem = Marshal.AllocHGlobal(Marshal.SizeOf<CopyData>());
+            _replied.Reset();
+            _reply.Hits = new List<EverythingHit>();
+            _reply.GotReply = false;
+
+            var chars = text.Length;
+            var size = 20 + (chars + 1) * 2;
+            var query = Marshal.AllocHGlobal(size);
+            var cdsMem = Marshal.AllocHGlobal(Marshal.SizeOf<CopyData>());
+            try
+            {
+                Marshal.WriteInt32(query, 0, unchecked((int)_reply.Handle.ToInt64()));
+                Marshal.WriteInt32(query, 4, ReplyId);
+                Marshal.WriteInt32(query, 8, 0);
+                Marshal.WriteInt32(query, 12, 0);
+                Marshal.WriteInt32(query, 16, MaxResults);
+                var bytes = Encoding.Unicode.GetBytes(text + "\0");
+                Marshal.Copy(bytes, 0, query + 20, bytes.Length);
+
+                var cds = new CopyData
+                {
+                    dwData = (IntPtr)QueryUnicode,
+                    cbData = size,
+                    lpData = query,
+                };
+                Marshal.StructureToPtr(cds, cdsMem, false);
+                var sent = SendMessageTimeout(
+                    ipc,
+                    WmCopyData,
+                    _reply.Handle,
+                    cdsMem,
+                    SmtoAbortIfHung,
+                    5000,
+                    out _);
+                // 回复投到 STA 回复窗；那边 Application.Run 泵消息，这里只等事件，不 DoEvents。
+                _replied.Wait(2000);
+                if (sent == IntPtr.Zero && !_reply.GotReply)
+                    throw new InvalidOperationException("查询没有返回");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(cdsMem);
+                Marshal.FreeHGlobal(query);
+            }
+
+            return _reply.Hits;
+        }
+    }
+
+    private static void EnsureSta()
+    {
+        if (_reply != null) return;
+        _ready = new ManualResetEventSlim(false);
+        _replied = new ManualResetEventSlim(false);
+        _sta = new Thread(StaLoop)
+        {
+            IsBackground = true,
+            Name = "EverythingIpc",
+        };
+        _sta.SetApartmentState(ApartmentState.STA);
+        _sta.Start();
+        if (!_ready.Wait(5000) || _reply == null)
+            throw new InvalidOperationException("查询窗口没起来");
+    }
+
+    private static void StaLoop()
+    {
         try
         {
-            Marshal.WriteInt32(query, 0, unchecked((int)_reply.Handle.ToInt64()));
-            Marshal.WriteInt32(query, 4, ReplyId);
-            Marshal.WriteInt32(query, 8, 0);
-            Marshal.WriteInt32(query, 12, 0);
-            Marshal.WriteInt32(query, 16, MaxResults);
-            var bytes = Encoding.Unicode.GetBytes(text + "\0");
-            Marshal.Copy(bytes, 0, query + 20, bytes.Length);
-
-            var cds = new CopyData
-            {
-                dwData = (IntPtr)QueryUnicode,
-                cbData = size,
-                lpData = query,
-            };
-            Marshal.StructureToPtr(cds, cdsMem, false);
-            var sent = SendMessageTimeout(
-                ipc,
-                WmCopyData,
-                _reply.Handle,
-                cdsMem,
-                SmtoAbortIfHung,
-                5000,
-                out _);
-            var until = Environment.TickCount64 + 2000;
-            while (!_reply.GotReply && Environment.TickCount64 < until)
-            {
-                Application.DoEvents();
-                Thread.Sleep(10);
-            }
-            if (sent == IntPtr.Zero && !_reply.GotReply)
-                throw new InvalidOperationException("查询没有返回");
+            _reply = new ReplyWindow(OnReply);
+            _reply.Ensure();
+            _ready?.Set();
+            Application.Run();
         }
-        finally
+        catch
         {
-            Marshal.FreeHGlobal(cdsMem);
-            Marshal.FreeHGlobal(query);
+            _ready?.Set();
         }
-
-        return _reply.Hits;
     }
+
+    private static void OnReply() => _replied?.Set();
 
     private static IntPtr FindIpcWindow()
     {
@@ -130,6 +169,10 @@ public static class EverythingSearch
 
     private sealed class ReplyWindow : NativeWindow
     {
+        private readonly Action _onReply;
+
+        public ReplyWindow(Action onReply) => _onReply = onReply;
+
         public List<EverythingHit> Hits { get; set; } = new();
         public bool GotReply { get; set; }
 
@@ -156,6 +199,7 @@ public static class EverythingSearch
                         ? Parse(cds.lpData, cds.cbData)
                         : new List<EverythingHit>();
                     m.Result = (IntPtr)1;
+                    _onReply();
                     return;
                 }
             }
