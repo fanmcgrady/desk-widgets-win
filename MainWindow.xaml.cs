@@ -30,9 +30,9 @@ public partial class MainWindow : Window
     private const double PanelWidthDip = 320;
     /// <summary>笔记、邮件、大模型、文件的统一宽度。</summary>
     private const double PanelWidthMailDip = 560;
-    private const int EdgeHitDip = 8;
+    private const int EdgeHitDip = 12;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
-    private const int EdgeExpandDwellMs = 320;
+    private const int EdgeExpandDwellMs = 180;
 
     private enum TabMode { Note, Todo, Mail, Agent, Cyber, File }
     private enum CyberListMode { Hot, Fav, Sources }
@@ -491,7 +491,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 前台是其他应用的全屏/最大化窗口且盖住左缘时，禁止贴边自动展开。托盘仍可手动展开。
+    /// 仅「真全屏」（盖住任务栏，如游戏/看片）时禁止贴边展开。
+    /// 普通最大化窗口不再拦截，否则浏览器/IDE 最大化时左缘永远唤不出侧栏。
     /// </summary>
     private bool ShouldSuppressEdgeExpand(WinForms.Screen screen)
     {
@@ -511,21 +512,14 @@ public partial class MainWindow : Window
 
         if (!GetWindowRect(fg, out var r)) return false;
         var b = screen.Bounds;
-        var wa = screen.WorkingArea;
         var scale = DpiScale(screen);
         var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
 
-        // 真全屏：盖满整块显示器（含任务栏区域）
+        // 真全屏：盖满整块显示器（含任务栏）
         var coversBounds = r.Left <= b.Left + 4 && r.Top <= b.Top + 4
                            && r.Right >= b.Right - 4 && r.Bottom >= b.Bottom - 4;
-        // 最大化：盖满工作区
-        var coversWork = IsZoomed(fg)
-                         || (r.Left <= wa.Left + 4 && r.Top <= wa.Top + 4
-                             && r.Right >= wa.Right - 4 && r.Bottom >= wa.Bottom - 4);
-        // 窗口左缘压住贴边热区
-        var coversLeftHit = r.Left <= wa.Left + hit && r.Right > wa.Left + hit;
-
-        return (coversBounds || coversWork) && coversLeftHit;
+        var coversLeftHit = r.Left <= b.Left + hit && r.Right > b.Left + hit;
+        return coversBounds && coversLeftHit;
     }
 
     private void EnsureHwnd()
@@ -2481,8 +2475,11 @@ public partial class MainWindow : Window
 
         // 热点才初始化主 WebView；预载实例留给 PrefetchNextCyberNews
         _ = EnsureCyberWebAsync();
+        // ShowCyberHot… 里若联网刷新，结束时会自己打开第一条；这里只在未刷新时补一次
+        var willFetch = _cyberNews.CachedUnread.Count == 0 || _cyberNews.IsFetchDue;
         await ShowCyberHotFromCacheThenMaybeFetchAsync();
-        TryOpenFirstCyberNewsIfEmpty();
+        if (!willFetch)
+            TryOpenFirstCyberNewsIfEmpty();
     }
 
     private async Task EnterAgentTabAsync()
@@ -3462,8 +3459,21 @@ public partial class MainWindow : Window
 
     private void SetCyberHotHint(int? count = null)
     {
-        var n = count ?? _cyberNews.UnreadCount;
-        CyberNewsHint.Text = n == 0 ? "暂无未读（可点刷新）" : $"未读 {n}";
+        var unread = count ?? _cyberNews.UnreadCount;
+        var total = _cyberNews.CachedUnread.Count;
+        var when = _cyberNews.LastFetchLocalText;
+        if (total == 0)
+        {
+            CyberNewsHint.Text = string.IsNullOrEmpty(when)
+                ? "暂无资讯（可点刷新）"
+                : $"暂无资讯 · 上次拉取 {when}（可点刷新）";
+            return;
+        }
+        CyberNewsHint.Text = unread > 0
+            ? $"未读 {unread} / 共 {total}"
+            : string.IsNullOrEmpty(when)
+                ? $"共 {total} · 全部已读"
+                : $"共 {total} · 全部已读 · 拉取 {when}";
     }
 
     private void SetCyberFavHint()
@@ -3495,14 +3505,15 @@ public partial class MainWindow : Window
             await RefreshCyberNewsAsync(force: cached.Count == 0);
     }
 
-    /// <summary>热点页无详情时，自动打开第一条并从列表去掉。</summary>
+    /// <summary>热点页无详情时，优先打开第一条未读；不立刻标已读。</summary>
     private void TryOpenFirstCyberNewsIfEmpty()
     {
         if (_tab != TabMode.Cyber || _cyberListMode != CyberListMode.Hot) return;
         if (_cyberNewsOpen != null) return;
-        var unread = _cyberNews.CachedUnread;
-        if (unread.Count == 0) return;
-        OpenCyberNewsDetail(unread[0], dismissFromHot: true);
+        var list = _cyberNews.CachedUnread;
+        if (list.Count == 0) return;
+        var first = list.FirstOrDefault(i => !_cyberNews.IsRead(i)) ?? list[0];
+        OpenCyberNewsDetail(first, dismissFromHot: false);
     }
 
     private async Task PollCyberNewsAsync(bool silent)
@@ -3586,6 +3597,8 @@ public partial class MainWindow : Window
         foreach (var item in items)
         {
             var capture = item;
+            var read = fromHot && _cyberNews.IsRead(capture);
+            var titleFg = read ? muted : fg;
             var row = new Border
             {
                 Padding = new Thickness(8, 8, 8, 8),
@@ -3593,14 +3606,15 @@ public partial class MainWindow : Window
                 Background = MediaBrushes.Transparent,
                 BorderBrush = (MediaBrush)FindResource("Line"),
                 BorderThickness = new Thickness(0, 0, 0, 1),
+                Opacity = read ? 0.72 : 1,
             };
             var stack = new StackPanel();
             stack.Children.Add(new TextBlock
             {
                 Text = capture.Title,
                 FontSize = 13,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = fg,
+                FontWeight = read ? FontWeights.Normal : FontWeights.SemiBold,
+                Foreground = titleFg,
                 TextWrapping = TextWrapping.Wrap,
             });
             var preview = FormatCyberListPreview(capture);
@@ -3618,9 +3632,11 @@ public partial class MainWindow : Window
                 });
             }
             var meta = capture.Published?.ToLocalTime().ToString("MM-dd HH:mm");
+            var metaText = string.IsNullOrEmpty(meta) ? capture.Source : $"{capture.Source} · {meta}";
+            if (read) metaText += " · 已读";
             stack.Children.Add(new TextBlock
             {
-                Text = string.IsNullOrEmpty(meta) ? capture.Source : $"{capture.Source} · {meta}",
+                Text = metaText,
                 FontSize = 10.5,
                 Foreground = muted,
                 Margin = new Thickness(0, 4, 0, 0),
@@ -3905,14 +3921,44 @@ public partial class MainWindow : Window
 
         if (_cyberListMode == CyberListMode.Hot)
         {
-            var unread = _cyberNews.CachedUnread;
-            if (unread.Count == 0)
+            // → ：当前条标已读，优先下一条未读；没有未读则按列表顺序下一条
+            if (_cyberNewsOpen != null)
+                _cyberNews.MarkRead(_cyberNewsOpen.Id);
+            var list = _cyberNews.CachedUnread;
+            if (list.Count == 0)
             {
-                CyberNewsHint.Text = "没有更多未读";
+                UpdateCyberBadge();
+                ShowCyberHotList();
+                CyberNewsHint.Text = "没有更多资讯";
                 return;
             }
-            // 无详情或已读当前条后，列表头即下一条/第一条
-            OpenCyberNewsDetail(unread[0], dismissFromHot: true);
+            CyberNewsItem? next = null;
+            if (_cyberNewsOpen != null)
+            {
+                var hotIdx = -1;
+                for (var i = 0; i < list.Count; i++)
+                {
+                    if (string.Equals(list[i].Id, _cyberNewsOpen.Id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        hotIdx = i;
+                        break;
+                    }
+                }
+                for (var i = hotIdx + 1; i < list.Count; i++)
+                {
+                    if (!_cyberNews.IsRead(list[i]))
+                    {
+                        next = list[i];
+                        break;
+                    }
+                }
+                if (next == null && hotIdx >= 0 && hotIdx + 1 < list.Count)
+                    next = list[hotIdx + 1];
+            }
+            next ??= list.FirstOrDefault(i => !_cyberNews.IsRead(i)) ?? list[0];
+            OpenCyberNewsDetail(next, dismissFromHot: false);
+            UpdateCyberBadge();
+            ShowCyberHotList();
             return;
         }
 

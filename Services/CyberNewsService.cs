@@ -22,6 +22,10 @@ public sealed record CyberNewsItem(
 public sealed class CyberNewsService
 {
     private const int MaxUnreadInbox = 300;
+    /// <summary>单源每次最多收下这么多条，避免整站归档把收件箱塞满。</summary>
+    private const int MaxItemsPerFeed = 25;
+    /// <summary>发布时间早于该窗口的未读从收件箱清掉，避免旧博客占满列表。</summary>
+    private static readonly TimeSpan InboxMaxAge = TimeSpan.FromDays(45);
     private static readonly HttpClient Http = CreateClient(useProxy: false);
     private static readonly HttpClient HttpProxy = CreateClient(useProxy: true);
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
@@ -77,9 +81,10 @@ public sealed class CyberNewsService
         _favorites = LoadFavorites(_favPath);
         _inbox = LoadInbox(_inboxPath);
         _lastFetchUtc = LoadLastFetchUtc(_lastFetchPath);
-        // 启动时清掉已读残留，并去掉已下线 / 非网安源
+        // 启动时清掉已读残留，并去掉已下线 / 非网安源 / 过期未读
         PruneReadFromInbox(save: false);
-        PruneDroppedSourcesFromInbox(save: true);
+        PruneDroppedSourcesFromInbox(save: false);
+        PruneStaleFromInbox(save: true);
     }
 
     private void PruneDroppedSourcesFromInbox(bool save)
@@ -150,12 +155,17 @@ public sealed class CyberNewsService
         return true;
     }
 
-    public int UnreadCount => _inbox.Count;
+    /// <summary>未读条数（角标）；已读仍留在热点列表里。</summary>
+    public int UnreadCount => _inbox.Values.Count(i => !IsReadId(i.Id) && !IsReadId(i.Link));
 
+    /// <summary>热点列表：最近拉取到的条目（含已读）。</summary>
     public IReadOnlyList<CyberNewsItem> CachedUnread =>
         _inbox.Values
             .OrderByDescending(i => i.Published ?? DateTimeOffset.MinValue)
             .ToList();
+
+    public bool IsRead(CyberNewsItem item) =>
+        IsReadId(item.Id) || IsReadId(item.Link);
 
     public IReadOnlyList<CyberNewsItem> Favorites => _favorites;
 
@@ -163,47 +173,46 @@ public sealed class CyberNewsService
         _lastFetchUtc == DateTime.MinValue
         || DateTime.UtcNow - _lastFetchUtc >= FetchMinInterval;
 
+    /// <summary>上次成功拉取的本地时间文案；从未拉过则空。</summary>
+    public string LastFetchLocalText =>
+        _lastFetchUtc == DateTime.MinValue
+            ? ""
+            : _lastFetchUtc.ToLocalTime().ToString("MM-dd HH:mm");
+
     public async Task<IReadOnlyList<CyberNewsItem>> RefreshAsync(bool force = false, CancellationToken ct = default)
     {
         // 非强制：有本地缓存且未到拉取间隔 → 只返回收件箱
         if (!force && _inbox.Count > 0 && !IsFetchDue)
             return CachedUnread;
 
-        var bag = new List<CyberNewsItem>();
-        var anyFeedOk = false;
-        foreach (var feed in _feeds)
+        // 多源并行拉，避免单个大源拖死后面的源
+        using var gate = new SemaphoreSlim(4);
+        var tasks = _feeds.Select(async feed =>
         {
-            ct.ThrowIfCancellationRequested();
+            await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                if (string.Equals(feed.Url, AnquankeKnowledgeApi, StringComparison.OrdinalIgnoreCase))
-                {
-                    var posts = await FetchAnquankeKnowledgeAsync(feed.Label, ct);
-                    if (posts.Count == 0) continue;
-                    bag.AddRange(posts);
-                    anyFeedOk = true;
-                    continue;
-                }
-
-                var xml = await DownloadFeedXmlAsync(feed.Url, ct);
-                if (xml == null) continue;
-                bag.AddRange(ParseFeed(xml, feed.Label));
-                anyFeedOk = true;
+                return await FetchOneFeedAsync(feed, ct).ConfigureAwait(false);
             }
-            catch
+            finally
             {
-                // 单源失败忽略
+                gate.Release();
             }
-        }
+        }).ToList();
+
+        var chunks = await Task.WhenAll(tasks).ConfigureAwait(false);
+        var bag = chunks.SelectMany(x => x).ToList();
+        var anyFeedOk = chunks.Any(x => x.Count > 0);
 
         foreach (var item in bag)
         {
             if (string.IsNullOrWhiteSpace(item.Id)) continue;
-            if (_readIds.Contains(item.Id)) continue;
-            if (_inbox.ContainsKey(item.Id)) continue;
+            // 已读也留在列表里，否则源上暂时没新文时热点会空
             _inbox[item.Id] = item;
         }
 
+        // 归档源会带回很旧的条目，合并后再按发布时间裁掉
+        PruneStaleFromInbox(save: false);
         TrimInbox();
         SaveInbox();
         // 全部源失败时不推进间隔，避免空收件箱卡住一小时
@@ -215,13 +224,57 @@ public sealed class CyberNewsService
         return CachedUnread;
     }
 
+    private async Task<List<CyberNewsItem>> FetchOneFeedAsync(CyberFeed feed, CancellationToken ct)
+    {
+        try
+        {
+            if (string.Equals(feed.Url, AnquankeKnowledgeApi, StringComparison.OrdinalIgnoreCase))
+            {
+                var posts = await FetchAnquankeKnowledgeAsync(feed.Label, ct).ConfigureAwait(false);
+                return posts.Count == 0 ? new List<CyberNewsItem>() : posts.Take(MaxItemsPerFeed).ToList();
+            }
+
+            var xml = await DownloadFeedXmlAsync(feed.Url, ct).ConfigureAwait(false);
+            if (xml == null) return new List<CyberNewsItem>();
+            return ParseFeed(xml, feed.Label).Take(MaxItemsPerFeed).ToList();
+        }
+        catch
+        {
+            return new List<CyberNewsItem>();
+        }
+    }
+
     public void MarkRead(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) return;
-        var changed = _readIds.Add(id);
-        var removed = _inbox.Remove(id);
+        var changed = false;
+        foreach (var key in ReadIdAliases(id))
+        {
+            if (_readIds.Add(key)) changed = true;
+        }
         if (changed) SaveReadIds();
-        if (removed) SaveInbox();
+    }
+
+    private bool IsReadId(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        foreach (var key in ReadIdAliases(id))
+        {
+            if (_readIds.Contains(key)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>hackernews 旧 guid 是 0.0.0.0，和新的正式地址都算同一条。</summary>
+    private static IEnumerable<string> ReadIdAliases(string id)
+    {
+        id = id.Trim();
+        yield return id;
+        var fixedLink = FixBrokenFeedLink(id);
+        if (!string.Equals(fixedLink, id, StringComparison.OrdinalIgnoreCase))
+            yield return fixedLink;
+        if (id.StartsWith("https://hackernews.cc/", StringComparison.OrdinalIgnoreCase))
+            yield return "http://0.0.0.0:8080/" + id["https://hackernews.cc/".Length..];
     }
 
     public bool IsFavorite(string id) =>
@@ -364,9 +417,15 @@ public sealed class CyberNewsService
     {
         try
         {
-            var keep = _readIds.TakeLast(800).ToList();
-            _readIds.Clear();
-            foreach (var id in keep) _readIds.Add(id);
+            // HashSet 无序，不能 TakeLast；超限时按当前枚举截断即可
+            var keep = _readIds.Count <= 800
+                ? _readIds.ToList()
+                : _readIds.Take(800).ToList();
+            if (keep.Count != _readIds.Count)
+            {
+                _readIds.Clear();
+                foreach (var id in keep) _readIds.Add(id);
+            }
             File.WriteAllText(_readPath, JsonSerializer.Serialize(keep, JsonOpts));
         }
         catch { /* ignore */ }
@@ -428,9 +487,35 @@ public sealed class CyberNewsService
 
     private void PruneReadFromInbox(bool save)
     {
-        var drop = _inbox.Keys.Where(id => _readIds.Contains(id)).ToList();
-        foreach (var id in drop) _inbox.Remove(id);
-        if (save && drop.Count > 0) SaveInbox();
+        // 已读不再踢出收件箱；角标用 UnreadCount 区分
+        if (save) SaveInbox();
+    }
+
+    /// <summary>清掉太旧的未读；并在收件箱几乎全是旧文时重置拉取时间，下次强制再拉。</summary>
+    private void PruneStaleFromInbox(bool save)
+    {
+        var cutoff = DateTimeOffset.UtcNow - InboxMaxAge;
+        var before = _inbox.Count;
+        var drop = _inbox
+            .Where(kv =>
+            {
+                var published = kv.Value.Published;
+                // 没有时间的条目保留（部分源不带 pubDate）；有时间且过旧的丢掉
+                return published != null && published < cutoff;
+            })
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var id in drop)
+            _inbox.Remove(id);
+        if (drop.Count > 0 && before > 0 && _inbox.Count * 3 < before)
+        {
+            // 清掉大半旧文后立刻再拉，避免还要等整点间隔
+            _lastFetchUtc = DateTime.MinValue;
+            try { if (File.Exists(_lastFetchPath)) File.Delete(_lastFetchPath); }
+            catch { /* ignore */ }
+        }
+        if (save && (drop.Count > 0 || before != _inbox.Count))
+            SaveInbox();
     }
 
     private void TrimInbox()
@@ -446,6 +531,7 @@ public sealed class CyberNewsService
 
     private static IEnumerable<CyberNewsItem> ParseFeed(string xml, string source)
     {
+        xml = SanitizeXmlEntities(xml);
         var doc = new XmlDocument { XmlResolver = null };
         using var reader = XmlReader.Create(new StringReader(xml), new XmlReaderSettings
         {
@@ -453,6 +539,7 @@ public sealed class CyberNewsService
             XmlResolver = null,
             IgnoreComments = true,
             IgnoreWhitespace = true,
+            CheckCharacters = false,
         });
         doc.Load(reader);
 
@@ -466,11 +553,16 @@ public sealed class CyberNewsService
                 var title = Inner(node, "title");
                 var link = Inner(node, "link");
                 var guid = Inner(node, "guid");
+                // 安全客等源只有 guid、没有 link
+                if (string.IsNullOrWhiteSpace(link) && LooksLikeHttpUrl(guid))
+                    link = guid;
                 var descHtml = node.SelectSingleNode("description")?.InnerText;
                 var contentHtml = node.SelectSingleNode("*[local-name()='encoded']")?.InnerText;
                 var pub = Inner(node, "pubDate");
                 if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) continue;
                 link = FixBrokenFeedLink(link);
+                if (!string.IsNullOrWhiteSpace(guid))
+                    guid = FixBrokenFeedLink(guid);
 
                 var summaryHtml = !string.IsNullOrWhiteSpace(contentHtml) ? contentHtml : descHtml;
                 yield return new CyberNewsItem(
@@ -498,6 +590,8 @@ public sealed class CyberNewsService
             var updated = InnerLocal(node, "updated") ?? InnerLocal(node, "published");
             if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(link)) continue;
             link = FixBrokenFeedLink(link);
+            if (!string.IsNullOrWhiteSpace(id))
+                id = FixBrokenFeedLink(id);
             yield return new CyberNewsItem(
                 Id: (id ?? link).Trim(),
                 Title: Decode(title),
@@ -578,6 +672,19 @@ public sealed class CyberNewsService
     /// <summary>hackernews.cc 的订阅把站点地址写成了 0.0.0.0:8080。</summary>
     private static string FixBrokenFeedLink(string link) =>
         link.Replace("http://0.0.0.0:8080", "https://hackernews.cc", StringComparison.OrdinalIgnoreCase);
+
+    private static bool LooksLikeHttpUrl(string? s) =>
+        !string.IsNullOrWhiteSpace(s)
+        && (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || s.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>部分源会写出 &mdash、&nbsp 这类不完整实体，XmlDocument 直接崩。</summary>
+    private static string SanitizeXmlEntities(string xml) =>
+        Regex.Replace(
+            xml ?? "",
+            @"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)",
+            "&amp;",
+            RegexOptions.IgnoreCase);
 
     private static string? Inner(XmlNode parent, string name) =>
         parent.SelectSingleNode(name)?.InnerText?.Trim();
