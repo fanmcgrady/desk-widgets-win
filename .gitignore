@@ -4,6 +4,7 @@ obj/
 [Bb]uild/
 [Oo]ut/
 publish/
+release/
 *.user
 *.suo
 *.userosscache
