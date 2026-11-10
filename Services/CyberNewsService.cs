@@ -39,18 +39,32 @@ public sealed class CyberNewsService
     private static readonly CyberFeed[] DefaultFeeds =
     {
         new("安全客", "https://api.anquanke.com/data/v1/rss"),
-        new("绿盟科技技术博客", "https://blog.nsfocus.net/feed/"),
-        new("嘶吼", "https://www.4hou.com/feed"),
-        new("游侠安全网", "https://www.youxia.org/feed/"),
-        new("HackerNews", "https://hackernews.cc/feed"),
-        new("阿尔法实验室", "https://blog.topsec.com.cn/feed/"),
-        new("安全村", "https://wechat2rss.xlab.app/feed/13267b55f2dbff6e536b4d593408fe0ef977cb43.xml"),
         new("安全客-安全知识", AnquankeKnowledgeApi),
-        new("安全牛", "https://wechat2rss.xlab.app/feed/10f1ba549b70cdb4216f7ade606d30a813305aa1.xml"),
-        new("奇安信A-TEAM", "https://wechat2rss.xlab.app/feed/7e9f1ce42f56754f4a6bacb9a67385e48ca643fb.xml"),
+        new("绿盟科技技术博客", "https://blog.nsfocus.net/feed/"),
+        new("FreeBuf", "https://www.freebuf.com/feed"),
+        new("先知社区", "https://xz.aliyun.com/feed"),
+        new("Seebug Paper", "https://paper.seebug.org/rss/"),
+        new("奇安信攻防社区", "https://forum.butian.net/Rss"),
+        new("HackerNews", "https://hackernews.cc/feed"),
+        new("游侠安全网", "https://www.youxia.org/feed/"),
         new("倾旋的博客", "https://payloads.online/index.xml"),
-        new("腾讯安全响应中心", "https://security.tencent.com/index.php/feed/blog/0"),
-        new("腾讯科恩", "https://keenlab.tencent.com/zh/atom.xml"),
+        // wechat2rss：直连常超时，有本机 SOCKS 1080 时还能用
+        new("安全牛", "https://wechat2rss.xlab.app/feed/10f1ba549b70cdb4216f7ade606d30a813305aa1.xml"),
+    };
+
+    /// <summary>停更 / 超时 / 过旧的源地址，加载时从本机名单里清掉。</summary>
+    private static readonly string[] RetiredFeedUrlNeedles =
+    {
+        "4hou.com",                 // 嘶吼 RSS 停在 2026-05
+        "blog.topsec.com.cn",       // 阿尔法实验室停更
+        "13267b55f2dbff6e536b4d593408fe0ef977cb43", // 安全村 wechat2rss 超时
+        "7e9f1ce42f56754f4a6bacb9a67385e48ca643fb", // 奇安信 A-TEAM 停在 2023
+        "keenlab.tencent.com",      // 科恩博客 RSS 停在 2025-12
+        "security.tencent.com",     // TSRC 博客 RSS 数月一条
+        "schneier.com",
+        "lonelysec.com",
+        "csdn.net",
+        "troyhunt.com",
     };
 
     private readonly string _readPath;
@@ -76,11 +90,18 @@ public sealed class CyberNewsService
         _lastFetchPath = Path.Combine(dir, "cyber-news-lastfetch.txt");
         _feedsPath = Path.Combine(dir, "cyber-news-feeds.json");
         _feeds = LoadFeeds(_feedsPath, out var feedsDirty);
-        if (feedsDirty) SaveFeeds();
+        if (feedsDirty)
+        {
+            SaveFeeds();
+            // 源名单刚换过：清掉间隔，启动后马上重拉
+            _lastFetchUtc = DateTime.MinValue;
+            try { if (File.Exists(_lastFetchPath)) File.Delete(_lastFetchPath); } catch { /* ignore */ }
+        }
         _readIds = LoadReadIds(_readPath);
         _favorites = LoadFavorites(_favPath);
         _inbox = LoadInbox(_inboxPath);
-        _lastFetchUtc = LoadLastFetchUtc(_lastFetchPath);
+        if (!feedsDirty)
+            _lastFetchUtc = LoadLastFetchUtc(_lastFetchPath);
         // 启动时清掉已读残留，并去掉已下线 / 非网安源 / 过期未读
         PruneReadFromInbox(save: false);
         PruneDroppedSourcesFromInbox(save: false);
@@ -93,11 +114,13 @@ public sealed class CyberNewsService
         var droppedHosts = new[]
         {
             "ithome.com", "solidot.org", "landiannews.com", "oschina.net", "sspai.com",
-            "cn-sec.com",
+            "cn-sec.com", "4hou.com", "blog.topsec.com.cn", "keenlab.tencent.com",
+            "security.tencent.com",
         };
         var droppedLabels = new[]
         {
             "IT之家", "Solidot", "蓝点网", "开源中国", "少数派", "CN-SEC",
+            "嘶吼", "阿尔法实验室", "奇安信A-TEAM", "安全村", "腾讯科恩", "腾讯安全响应中心",
         };
         var keepLabels = new HashSet<string>(_feeds.Select(f => f.Label), StringComparer.OrdinalIgnoreCase);
         var remove = _inbox.Where(kv =>
@@ -646,12 +669,22 @@ public sealed class CyberNewsService
             if (loaded == null) return DefaultFeeds.ToList();
             var filtered = loaded
                 .Where(f => !string.IsNullOrWhiteSpace(f.Url) && !string.IsNullOrWhiteSpace(f.Label))
-                .Where(f => !f.Url.Contains("schneier.com", StringComparison.OrdinalIgnoreCase))
-                .Where(f => !f.Url.Contains("lonelysec.com", StringComparison.OrdinalIgnoreCase))
-                .Where(f => !f.Url.Contains("csdn.net", StringComparison.OrdinalIgnoreCase))
-                .Where(f => !f.Url.Contains("troyhunt.com", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !IsRetiredFeedUrl(f.Url))
                 .ToList();
             dirty = filtered.Count != loaded.Count;
+
+            // 把默认名单里新增的活跃源补进本机配置（不覆盖用户手加的）
+            var have = new HashSet<string>(
+                filtered.Select(f => f.Url.Trim().TrimEnd('/')),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var d in DefaultFeeds)
+            {
+                var key = d.Url.Trim().TrimEnd('/');
+                if (have.Contains(key)) continue;
+                filtered.Add(d);
+                have.Add(key);
+                dirty = true;
+            }
             return filtered;
         }
         catch
@@ -659,6 +692,9 @@ public sealed class CyberNewsService
             return DefaultFeeds.ToList();
         }
     }
+
+    private static bool IsRetiredFeedUrl(string url) =>
+        RetiredFeedUrlNeedles.Any(n => url.Contains(n, StringComparison.OrdinalIgnoreCase));
 
     private void SaveFeeds()
     {

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -783,7 +783,10 @@ public partial class MainWindow : Window
         return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
     }
 
-    /// <summary>前台是本窗或 WebView2 等子 HWND 时都算侧栏在前台（否则打开详情后快捷键全失效）。</summary>
+    [DllImport("user32.dll")]
+    private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+    /// <summary>前台是本窗、子 HWND、同进程窗口，或挂在本窗下的 WebView2 时都算侧栏在前台。</summary>
     private bool IsOurWindowForeground()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
@@ -791,7 +794,35 @@ public partial class MainWindow : Window
         var fg = GetForegroundWindow();
         if (fg == IntPtr.Zero) return false;
         if (fg == hwnd) return true;
-        return GetAncestor(fg, GaRoot) == hwnd;
+        if (GetAncestor(fg, GaRoot) == hwnd) return true;
+        if (IsChild(hwnd, fg)) return true;
+
+        // 同进程任意顶层/子窗（含部分 WPF 托管层）
+        GetWindowThreadProcessId(fg, out var fgPid);
+        GetWindowThreadProcessId(hwnd, out var ourPid);
+        if (fgPid != 0 && fgPid == ourPid) return true;
+
+        // 笔记/邮件 WebView2 偶发异进程焦点：侧栏展开且鼠标仍在面板内也算
+        if (_expanded && IsMouseOverOurPanel()) return true;
+        return false;
+    }
+
+    private bool IsMouseOverOurPanel()
+    {
+        try
+        {
+            var screen = ResolveScreen(_dockScreen)
+                         ?? WinForms.Screen.PrimaryScreen
+                         ?? PickDefaultDockScreen();
+            var scale = DpiScale(screen);
+            var dipW = CapPanelWidthDip(screen, ActivePanelWidthDip);
+            var widthPx = Math.Max(1, (int)Math.Round(dipW * scale));
+            var wa = screen.WorkingArea;
+            var mouse = WinForms.Control.MousePosition;
+            return mouse.X >= wa.Left && mouse.X <= wa.Left + widthPx
+                   && mouse.Y >= wa.Top && mouse.Y <= wa.Bottom;
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -855,14 +886,16 @@ public partial class MainWindow : Window
                 return (IntPtr)1;
             }
 
-            // 文件页切到别的程序后，搜索框焦点还在，侧栏不会随鼠标离开收起。
-            // 这时单独的 Esc 收起文件页，但不吞键，当前程序照常收到 Esc。
+            // 展开中但前台判定失败（笔记预览 WebView2 / 文件搜索切走焦点等）：Esc 仍收起。
+            // 文件页切到别的程序时不吞键；仍在本侧栏面板上则吞掉，避免把 Esc 送给别的窗。
             if (down && (info.Flags & LlKhfInjected) == 0
-                && _expanded && !ourFg && _tab == TabMode.File
+                && _expanded && !ourFg
                 && info.VkCode == VkEscape
                 && !IsAltDown() && !IsCtrlDown() && !IsShiftDown())
             {
+                var overPanel = IsMouseOverOurPanel() || _inputFocused || _notePreviewMode;
                 Dispatcher.BeginInvoke(TryHandleEscapeKey, DispatcherPriority.Send);
+                if (overPanel) return (IntPtr)1;
             }
 
             // 双击 Ctrl → 唤醒。不吞键。低级钩子给出的是左右 Ctrl。
@@ -1022,7 +1055,7 @@ public partial class MainWindow : Window
     private void UpdateTrayHotkeyTip()
     {
         if (_tray == null) return;
-        var parts = new List<string> { "方老师的工作区" };
+        var parts = new List<string> { "工作区" };
         if (_keyboardHookInstalled)
         {
             parts.Add("连按两下 Ctrl");
@@ -1281,14 +1314,18 @@ public partial class MainWindow : Window
 
     private void Collapse()
     {
-        FlushNoteSave();
+        try { FlushNoteSave(); }
+        catch { /* 保存失败也不挡收起 */ }
         UnregisterTabHotkeys();
         _expanded = false;
         _pinned = false;
         _inputFocused = false;
         UpdatePinButton();
         _leaveSince = null;
+        // 收起后鼠标常还在原面板位置，短暂忽略贴边展开，避免 Esc 刚藏又被左缘唤回
         _awaitPanelEnter = false;
+        _edgeHoverSince = null;
+        _dockLockUntilUtc = DateTime.UtcNow.AddMilliseconds(280);
         PlaceCollapsed();
         SyncEdgeTimerInterval();
     }
@@ -1377,6 +1414,12 @@ public partial class MainWindow : Window
 
         if (!_expanded)
         {
+            // Esc 刚收起 / 投屏复位：短暂禁止贴边再展开
+            if (dockLocked)
+            {
+                _edgeHoverSince = null;
+                return;
+            }
             if (edgeScreen == null)
             {
                 _edgeHoverSince = null;
@@ -1586,9 +1629,11 @@ public partial class MainWindow : Window
             e.Handled = true;
     }
 
-    /// <summary>Esc 收起侧栏。行内改标题时先取消编辑。</summary>
+    /// <summary>Esc 收起侧栏。行内改标题时先取消编辑；笔记编辑框有焦点时直接收起。</summary>
     private bool TryHandleEscapeKey()
     {
+        if (!_expanded) return false;
+
         if (_inlineEscCancel != null)
         {
             var cancel = _inlineEscCancel;
@@ -1597,6 +1642,14 @@ public partial class MainWindow : Window
             _inputFocused = false;
             return true;
         }
+
+        // 笔记编辑/预览可能占着键盘焦点，先清掉再收起，避免收起后焦点状态错乱
+        try
+        {
+            if (NoteEdit.IsKeyboardFocused || _inputFocused)
+                BlurInputFocus();
+        }
+        catch { /* ignore */ }
 
         Collapse();
         return true;
@@ -1645,7 +1698,7 @@ public partial class MainWindow : Window
         {
             Icon = _trayIcon,
             Visible = true,
-            Text = "方老师的工作区",
+            Text = "工作区",
         };
         var menu = new WinForms.ContextMenuStrip
         {
@@ -2825,8 +2878,8 @@ public partial class MainWindow : Window
 
         if (_tray != null)
             _tray.Text = _mailUnread > 0
-                ? $"方老师的工作区 · 未读 {_mailUnread}"
-                : "方老师的工作区";
+                ? $"工作区 · 未读 {_mailUnread}"
+                : "工作区";
     }
 
     private UIElement BuildMailRow(MailMessageSummary m)
@@ -5444,6 +5497,13 @@ public partial class MainWindow : Window
         AttachNoteWatcher(_activeNoteId);
         // 与 Esc 一样收起，把前台让给记事本
         Collapse();
+    }
+
+    private void NoteEdit_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        if (TryHandleEscapeKey())
+            e.Handled = true;
     }
 
     private void NoteEdit_TextChanged(object sender, TextChangedEventArgs e)
