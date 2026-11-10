@@ -26,9 +26,9 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>待办窄栏宽度。笔记、邮件、大模型、文件用同一宽栏。</summary>
+    /// <summary>笔记、待办、邮件列表、大模型、文件的窄栏宽度；仅网安满屏。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>笔记、邮件、大模型、文件的统一宽度。</summary>
+    /// <summary>邮件详情 / 写信栏宽；网安满屏时也作下限参考。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 12;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
@@ -221,8 +221,8 @@ public partial class MainWindow : Window
         _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
         _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
 
-        // 网安热点：每小时拉取，未读累加；角标显示条数
-        _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
+        // 网安热点：约每 15 分钟静默拉取；进页/手动刷新也会拉
+        _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
         _cyberPollTimer.Tick += async (_, _) => await PollCyberNewsAsync(silent: true);
 
         _fileSearchTimer.Tick += async (_, _) =>
@@ -491,35 +491,22 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 仅「真全屏」（盖住任务栏，如游戏/看片）时禁止贴边展开。
-    /// 普通最大化窗口不再拦截，否则浏览器/IDE 最大化时左缘永远唤不出侧栏。
+    /// 贴边展开只在「桌面」时生效：前台是桌面/任务栏才允许。
+    /// 其它窗口（浏览器、IDE 等）在前台时不贴边唤出；托盘 / 双击 Ctrl 仍可开。
     /// </summary>
     private bool ShouldSuppressEdgeExpand(WinForms.Screen screen)
     {
+        _ = screen;
         EnsureHwnd();
         var self = new WindowInteropHelper(this).Handle;
         var fg = GetForegroundWindow();
         if (fg == IntPtr.Zero || fg == self) return false;
 
         var cls = new System.Text.StringBuilder(64);
-        if (GetClassName(fg, cls, cls.Capacity) > 0)
-        {
-            var name = cls.ToString();
-            // 桌面 / 任务栏不算遮挡
-            if (name is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
-                return false;
-        }
-
-        if (!GetWindowRect(fg, out var r)) return false;
-        var b = screen.Bounds;
-        var scale = DpiScale(screen);
-        var hit = Math.Max(6, (int)Math.Ceiling(EdgeHitDip * scale));
-
-        // 真全屏：盖满整块显示器（含任务栏）
-        var coversBounds = r.Left <= b.Left + 4 && r.Top <= b.Top + 4
-                           && r.Right >= b.Right - 4 && r.Bottom >= b.Bottom - 4;
-        var coversLeftHit = r.Left <= b.Left + hit && r.Right > b.Left + hit;
-        return coversBounds && coversLeftHit;
+        if (GetClassName(fg, cls, cls.Capacity) <= 0) return true;
+        var name = cls.ToString();
+        // 只有桌面墙纸层 / 任务栏算「在桌面」
+        return name is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd");
     }
 
     private void EnsureHwnd()
@@ -532,8 +519,9 @@ public partial class MainWindow : Window
     private double ActivePanelWidthDip => _tab switch
     {
         TabMode.Cyber => CyberReadingWidthDip(),
-        TabMode.Todo => PanelWidthDip,
-        _ => PanelWidthMailDip,
+        // 邮件详情 / 写信略宽，列表与其它页签仍用窄栏
+        TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
+        _ => PanelWidthDip,
     };
 
     /// <summary>网安页签：从左缘向右铺满当前屏工作区。</summary>
@@ -585,7 +573,9 @@ public partial class MainWindow : Window
         _lastPlaceH = h;
 
         // 宽高按这块屏的像素来，再换成 WPF 正在用的比例，避免 200% 和 125% 叠在一起把窗口撑大
+        // MaxWidth 锁死窄栏：邮件 HTML / WebView2 内容最小宽常把窗口撑到 560+
         Width = dipW;
+        MaxWidth = expanded && _tab != TabMode.Cyber ? dipW : double.PositiveInfinity;
         Height = h / wpfScale;
         MoveWindow(hwnd, x, y, widthPx, h, true);
         if (expanded)
@@ -1398,7 +1388,7 @@ public partial class MainWindow : Window
                 _edgeHoverSince = null;
                 return;
             }
-            // 其他应用全屏/最大化盖住左缘：不贴边展开（托盘仍可开）
+            // 非桌面（其它应用在前台）不贴边展开；托盘 / 双击 Ctrl 仍可开
             if (ShouldSuppressEdgeExpand(edgeScreen))
             {
                 _edgeHoverSince = null;
@@ -3073,6 +3063,8 @@ public partial class MainWindow : Window
                 MailReadHtml.Visibility = Visibility.Visible;
                 MailReadPlainHost.Visibility = Visibility.Collapsed;
                 MailReadHtml.NavigateToString(WrapMailHtml(html));
+                // WebView2 加载后常把窗口撑宽，再锁回窄栏
+                if (_expanded) PlaceExpanded();
                 return;
             }
             catch (Exception ex)
@@ -3105,13 +3097,21 @@ public partial class MainWindow : Window
         {
             MailReadHtml.CoreWebView2.NavigationStarting += MailHtml_NavigationStarting;
             MailReadHtml.CoreWebView2.NewWindowRequested += MailHtml_NewWindowRequested;
-            // 每封信加载后压掉横向滚动
+            // 每封信：压掉横向滚动，并强制正文可选中复制（覆盖邮件里的 user-select:none）
             _ = MailReadHtml.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
                 """
-                document.documentElement.style.overflowX='hidden';
-                document.documentElement.style.maxWidth='100%';
-                document.documentElement.style.width='100%';
-                if(document.body){document.body.style.overflowX='hidden';document.body.style.maxWidth='100%';document.body.style.width='100%';}
+                (function(){
+                  function apply(){
+                    var root=document.documentElement;
+                    if(root){root.style.overflowX='hidden';root.style.maxWidth='100%';root.style.width='100%';}
+                    if(document.body){document.body.style.overflowX='hidden';document.body.style.maxWidth='100%';document.body.style.width='100%';}
+                    var s=document.getElementById('dw-mail-select');
+                    if(!s){s=document.createElement('style');s.id='dw-mail-select';document.documentElement.appendChild(s);}
+                    s.textContent='*{ -webkit-user-select:text!important; user-select:text!important; }';
+                  }
+                  apply();
+                  document.addEventListener('DOMContentLoaded', apply);
+                })();
                 """);
             _mailHtmlHooksBound = true;
         }
@@ -3172,6 +3172,7 @@ public partial class MainWindow : Window
             html,body{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important;overflow-x:hidden!important;background:#fff;color:#1c1b1f;}
             body{font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;font-size:14px;line-height:1.55;padding:4px 2px 16px!important;word-wrap:break-word;overflow-wrap:anywhere;box-sizing:border-box;}
             *,*::before,*::after{box-sizing:border-box;max-width:100%!important;}
+            html,body,div,p,span,td,th,li,a,font,center,table,tr,tbody,thead,section,article,main,header,footer,pre,code,label,h1,h2,h3,h4,h5,h6,blockquote{-webkit-user-select:text!important;user-select:text!important;}
             img,video,iframe,svg{max-width:100%!important;height:auto!important;}
             table{width:100%!important;max-width:100%!important;table-layout:fixed!important;}
             td,th{word-wrap:break-word!important;overflow-wrap:anywhere!important;}
@@ -3200,6 +3201,43 @@ public partial class MainWindow : Window
                 MailReadHtml.NavigateToString("<!DOCTYPE html><html><body></body></html>");
         }
         catch { /* 忽略 */ }
+    }
+
+    private void BtnMailCopyBody_Click(object sender, RoutedEventArgs e)
+    {
+        var text = "";
+        if (_mailCurrent != null)
+        {
+            text = !string.IsNullOrWhiteSpace(_mailCurrent.BodyText)
+                ? _mailCurrent.BodyText
+                : StripMailHtmlApprox(_mailCurrent.BodyHtml);
+        }
+        if (string.IsNullOrWhiteSpace(text)
+            && MailReadPlainHost.Visibility == Visibility.Visible)
+            text = MailReadBody.Text ?? "";
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            SetMailStatus("没有可复制的正文");
+            return;
+        }
+        try
+        {
+            System.Windows.Clipboard.SetText(text.Trim());
+            SetMailStatus("正文已复制");
+        }
+        catch (Exception ex)
+        {
+            SetMailStatus("复制失败 · " + ShortErr(ex));
+        }
+    }
+
+    private static string StripMailHtmlApprox(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return "";
+        var t = System.Net.WebUtility.HtmlDecode(html);
+        t = System.Text.RegularExpressions.Regex.Replace(t, "<[^>]+>", " ");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"\s+", " ").Trim();
+        return t;
     }
 
     private void BtnMailBack_Click(object sender, RoutedEventArgs e)

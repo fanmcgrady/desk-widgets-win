@@ -29,8 +29,8 @@ public sealed class CyberNewsService
     private static readonly HttpClient Http = CreateClient(useProxy: false);
     private static readonly HttpClient HttpProxy = CreateClient(useProxy: true);
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
-    /// <summary>网络拉取最短间隔；切页签只读本地收件箱，整点/刷新才拉。</summary>
-    private static readonly TimeSpan FetchMinInterval = TimeSpan.FromHours(1);
+    /// <summary>网络拉取最短间隔；切页签只读本地收件箱，定时/刷新才拉。</summary>
+    private static readonly TimeSpan FetchMinInterval = TimeSpan.FromMinutes(15);
     private const string SocksProxy = "socks5://127.0.0.1:1080";
     /// <summary>安全客「安全知识」栏目没有单独 RSS，走帖子接口。</summary>
     private const string AnquankeKnowledgeApi =

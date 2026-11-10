@@ -544,6 +544,9 @@
                 <Button Content="← 返回" Style="{StaticResource MailGhostBtn}"
                         Click="BtnMailBack_Click" HorizontalAlignment="Left"/>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                  <Button Content="复制正文" Style="{StaticResource MailGhostBtn}"
+                          ToolTip="复制当前邮件正文到剪贴板"
+                          Click="BtnMailCopyBody_Click" Margin="0,0,6,0"/>
                   <Button Content="垃圾" Style="{StaticResource MailGhostBtn}"
                           ToolTip="标记为垃圾邮件并从列表移除（Ctrl+D）"
                           Click="BtnMailJunk_Click" Margin="0,0,6,0"/>
@@ -568,8 +571,14 @@
                                   DefaultBackgroundColor="#FFFFFF"/>
                     <ScrollViewer x:Name="MailReadPlainHost" VerticalScrollBarVisibility="Auto"
                                   HorizontalScrollBarVisibility="Disabled">
-                      <TextBlock x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
-                                 VerticalAlignment="Top" TextOptions.TextFormattingMode="Display"/>
+                      <TextBox x:Name="MailReadBody" FontSize="13.5" TextWrapping="Wrap"
+                               AcceptsReturn="True" IsReadOnly="True" BorderThickness="0"
+                               Background="Transparent" Padding="0"
+                               VerticalAlignment="Top" VerticalScrollBarVisibility="Disabled"
+                               HorizontalScrollBarVisibility="Disabled"
+                               TextOptions.TextFormattingMode="Display"
+                               GotKeyboardFocus="Input_GotFocus"
+                               LostKeyboardFocus="Input_LostFocus"/>
                     </ScrollViewer>
                   </Grid>
                 </DockPanel>
