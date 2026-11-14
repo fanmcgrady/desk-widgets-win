@@ -60,6 +60,16 @@ public static class Autostart
     {
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return;
+        var work = Path.GetDirectoryName(exe)!;
+        // 计划任务已指向同一 exe 则跳过 COM 重注册
+        if (TryGetLogonTaskAction(out var taskExe, out var taskWork, out var enabled)
+            && enabled
+            && PathsEqual(taskExe, exe)
+            && PathsEqual(taskWork, work))
+        {
+            DeleteShortcut();
+            return;
+        }
         if (TryRegisterLogonTask(exe))
         {
             DeleteShortcut();
@@ -68,11 +78,95 @@ public static class Autostart
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ShortcutPath)!);
-            CreateShortcut(ShortcutPath, exe, Path.GetDirectoryName(exe)!, "工作区");
+            if (File.Exists(ShortcutPath)
+                && TryReadShortcutTarget(ShortcutPath, out var linkExe, out var linkWork)
+                && PathsEqual(linkExe, exe)
+                && PathsEqual(linkWork, work))
+                return;
+            CreateShortcut(ShortcutPath, exe, work, "工作区");
         }
         catch
         {
             TryEnableViaPowerShell(exe);
+        }
+    }
+
+    private static bool PathsEqual(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(a.Trim()),
+                Path.GetFullPath(b.Trim()),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool TryGetLogonTaskAction(out string exe, out string workDir, out bool enabled)
+    {
+        exe = "";
+        workDir = "";
+        enabled = false;
+        object? service = null;
+        object? folder = null;
+        object? task = null;
+        try
+        {
+            var serviceType = Type.GetTypeFromProgID("Schedule.Service");
+            if (serviceType == null) return false;
+            service = Activator.CreateInstance(serviceType);
+            if (service == null) return false;
+            dynamic svc = service;
+            svc.Connect();
+            folder = svc.GetFolder("\\");
+            dynamic fld = folder;
+            task = fld.GetTask(TaskName);
+            dynamic registered = task;
+            enabled = (bool)registered.Enabled;
+            dynamic def = registered.Definition;
+            dynamic actions = def.Actions;
+            if (actions.Count < 1) return false;
+            dynamic action = actions[1]; // ITaskActionCollection is 1-based
+            exe = (string)(action.Path ?? "");
+            workDir = (string)(action.WorkingDirectory ?? "");
+            return !string.IsNullOrWhiteSpace(exe);
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            Release(task);
+            Release(folder);
+            Release(service);
+        }
+    }
+
+    private static bool TryReadShortcutTarget(string linkPath, out string exe, out string workDir)
+    {
+        exe = "";
+        workDir = "";
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null) return false;
+            dynamic shell = Activator.CreateInstance(shellType)!;
+            dynamic s = shell.CreateShortcut(linkPath);
+            exe = (string)(s.TargetPath ?? "");
+            workDir = (string)(s.WorkingDirectory ?? "");
+            try { Marshal.FinalReleaseComObject(s); } catch { /* ignore */ }
+            try { Marshal.FinalReleaseComObject(shell); } catch { /* ignore */ }
+            return !string.IsNullOrWhiteSpace(exe);
+        }
+        catch
+        {
+            return false;
         }
     }
 

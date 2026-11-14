@@ -9,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using DeskWidgets.Services;
+using DesktopBox;
 using Markdig;
 using DrawingColor = System.Drawing.Color;
 using DrawingIcon = System.Drawing.Icon;
@@ -26,9 +27,9 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>笔记、待办、邮件列表、大模型、文件的窄栏宽度；仅网安满屏。</summary>
+    /// <summary>待办、邮件列表、大模型、文件、笔记窄态；仅网安满屏。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>邮件详情 / 写信栏宽；网安满屏时也作下限参考。</summary>
+    /// <summary>笔记加宽 / 邮件详情·写信；网安满屏时也作下限参考。</summary>
     private const double PanelWidthMailDip = 560;
     private const int EdgeHitDip = 12;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
@@ -46,17 +47,10 @@ public partial class MainWindow : Window
     private CyberNewsItem? _cyberNewsOpen;
     private bool _cyberNewsLoading;
     private bool _cyberWebReady;
-    private bool _cyberPrefetchWebReady;
     private bool _cyberWebNavHooked;
-    private bool _cyberPrefetchNavHooked;
-    /// <summary>true 时 CyberNewsWebPrefetch 为前台，CyberNewsWeb 为预载。</summary>
-    private bool _cyberWebFlipped;
     /// <summary>详情导航代数：连按切换时只认最新一次。</summary>
     private int _cyberWebNavEpoch;
     private string? _cyberWebTargetUrl;
-    private string? _cyberPrefetchUrl;
-    private int _cyberPrefetchEpoch;
-    private bool _cyberPrefetchReady;
     private CancellationTokenSource? _cyberNavCts;
     private DateTime _cyberScrollAtUtc = DateTime.MinValue;
     private CyberListMode _cyberListMode = CyberListMode.Hot;
@@ -182,9 +176,8 @@ public partial class MainWindow : Window
     private string? _editingTodoId; // 从待办「编辑」进入时，笔记区改的是这条待办
     private bool _noteLoading;
     private bool _noteWriting;
-    private bool _notePreviewMode;
-    private bool _notePreviewReady;
-    private bool _notePreviewHooksBound;
+    /// <summary>笔记页是否用宽栏（560）；其它页签不受影响。</summary>
+    private bool _noteWide;
     private DispatcherTimer? _noteSaveTimer;
     private DispatcherTimer? _noteReloadDebounce;
     // 待办拖拽排序
@@ -218,7 +211,7 @@ public partial class MainWindow : Window
         };
 
         // 邮件未读：约每 2 分钟静默查一次；进邮件页 / 手动刷新也会更新
-        _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
+        _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(5) };
         _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
 
         // 网安热点：约每 15 分钟静默拉取；进页/手动刷新也会拉
@@ -254,6 +247,8 @@ public partial class MainWindow : Window
         ReloadNoteList();
         LoadActiveNote();
         UpdateNoteChrome();
+        LoadNoteWidthPref();
+        UpdateNoteWidthButton();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _dockScreen = PickDefaultDockScreen();
         // 先装钩子/热键，再直接收起。托盘、左缘、双击 Ctrl 再展开。
@@ -271,6 +266,21 @@ public partial class MainWindow : Window
 
         Dispatcher.BeginInvoke(() =>
         {
+            try
+            {
+                if (!DesktopBoxRuntime.TryStart())
+                    System.Diagnostics.Debug.WriteLine("DesktopBoxRuntime: mutex busy");
+                else
+                    FenceSettings.ReloadFromDisk();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("DesktopBoxRuntime: " + ex.Message);
+            }
+        }, DispatcherPriority.ApplicationIdle);
+
+        Dispatcher.BeginInvoke(() =>
+        {
             try { Autostart.ApplyPreferred(); } catch { /* ignore */ }
         }, DispatcherPriority.ContextIdle);
 
@@ -280,8 +290,14 @@ public partial class MainWindow : Window
         deferred.Tick += async (_, _) =>
         {
             deferred.Stop();
-            _ = PollMailUnreadAsync(silent: true);
-            await PollCyberNewsAsync(silent: true);
+            // 邮件列表缓存过期才打 IMAP；网安到拉取间隔才拉，避免启动连打两轮
+            var mailDue = _mail.Config.IsConfigured
+                          && (_mailCacheAtUtc == DateTime.MinValue
+                              || DateTime.UtcNow - _mailCacheAtUtc >= MailCacheTtl);
+            if (mailDue)
+                _ = PollMailUnreadAsync(silent: true);
+            if (_cyberNews.IsFetchDue)
+                await PollCyberNewsAsync(silent: true);
         };
         deferred.Start();
     }
@@ -519,8 +535,9 @@ public partial class MainWindow : Window
     private double ActivePanelWidthDip => _tab switch
     {
         TabMode.Cyber => CyberReadingWidthDip(),
-        // 邮件详情 / 写信略宽，列表与其它页签仍用窄栏
+        // 邮件详情 / 写信略宽；笔记可选手动加宽；文件页与默认同宽（分区配置在搜索下方）
         TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
+        TabMode.Note when _noteWide => PanelWidthMailDip,
         _ => PanelWidthDip,
     };
 
@@ -786,7 +803,10 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
 
-    /// <summary>前台是本窗、子 HWND、同进程窗口，或挂在本窗下的 WebView2 时都算侧栏在前台。</summary>
+    /// <summary>
+    /// 前台是侧栏本窗或其子 HWND（含 WebView2）时才算侧栏在前台。
+    /// 不把同进程的 DesktopBox 围栏算进来，否则区内键盘会被侧栏钩子抢走。
+    /// </summary>
     private bool IsOurWindowForeground()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
@@ -796,11 +816,6 @@ public partial class MainWindow : Window
         if (fg == hwnd) return true;
         if (GetAncestor(fg, GaRoot) == hwnd) return true;
         if (IsChild(hwnd, fg)) return true;
-
-        // 同进程任意顶层/子窗（含部分 WPF 托管层）
-        GetWindowThreadProcessId(fg, out var fgPid);
-        GetWindowThreadProcessId(hwnd, out var ourPid);
-        if (fgPid != 0 && fgPid == ourPid) return true;
 
         // 笔记/邮件 WebView2 偶发异进程焦点：侧栏展开且鼠标仍在面板内也算
         if (_expanded && IsMouseOverOurPanel()) return true;
@@ -886,14 +901,14 @@ public partial class MainWindow : Window
                 return (IntPtr)1;
             }
 
-            // 展开中但前台判定失败（笔记预览 WebView2 / 文件搜索切走焦点等）：Esc 仍收起。
+            // 展开中但前台判定失败（文件搜索切走焦点等）：Esc 仍收起。
             // 文件页切到别的程序时不吞键；仍在本侧栏面板上则吞掉，避免把 Esc 送给别的窗。
             if (down && (info.Flags & LlKhfInjected) == 0
                 && _expanded && !ourFg
                 && info.VkCode == VkEscape
                 && !IsAltDown() && !IsCtrlDown() && !IsShiftDown())
             {
-                var overPanel = IsMouseOverOurPanel() || _inputFocused || _notePreviewMode;
+                var overPanel = IsMouseOverOurPanel() || _inputFocused;
                 Dispatcher.BeginInvoke(TryHandleEscapeKey, DispatcherPriority.Send);
                 if (overPanel) return (IntPtr)1;
             }
@@ -1198,7 +1213,6 @@ public partial class MainWindow : Window
         KeyboardNavigation.SetIsTabStop(AgentTimeline, false);
         AgentTimeline.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
         CyberNewsWeb.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
-        CyberNewsWebPrefetch.PreviewGotKeyboardFocus += WebView_PreviewGotKeyboardFocus;
     }
 
     private void WebView_PreviewGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
@@ -1330,10 +1344,14 @@ public partial class MainWindow : Window
         SyncEdgeTimerInterval();
     }
 
-    /// <summary>收起 150ms、钉住 200ms、展开未钉 80ms。</summary>
+    /// <summary>收起默认 450ms；靠近左缘 120ms；钉住 200ms；展开未钉 80ms。</summary>
     private void SyncEdgeTimerInterval()
     {
-        var ms = !_expanded ? 150 : _pinned ? 200 : 80;
+        int ms;
+        if (!_expanded)
+            ms = ScreenNearLeftEdge(WinForms.Control.MousePosition) != null ? 120 : 450;
+        else
+            ms = _pinned ? 200 : 80;
         var want = TimeSpan.FromMilliseconds(ms);
         if (_edgeTimer.Interval != want)
             _edgeTimer.Interval = want;
@@ -1643,7 +1661,6 @@ public partial class MainWindow : Window
             return true;
         }
 
-        // 笔记编辑/预览可能占着键盘焦点，先清掉再收起，避免收起后焦点状态错乱
         try
         {
             if (NoteEdit.IsKeyboardFocused || _inputFocused)
@@ -1966,6 +1983,7 @@ public partial class MainWindow : Window
             _displayDebounce.Stop();
             _displayDebounce.Tick -= OnDisplayDebounceTick;
         }
+        try { DesktopBoxRuntime.Stop(); } catch { /* ignore */ }
         if (_tray != null)
         {
             _tray.Visible = false;
@@ -2243,6 +2261,7 @@ public partial class MainWindow : Window
         ExitTodoEditMode();
         _tab = TabMode.File;
         StyleTabs();
+        FenceSettings.ReloadFromDisk();
         FocusFileSearchSoon();
         _ = RunFileSearchAsync();
     }
@@ -2516,7 +2535,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 热点才初始化主 WebView；预载实例留给 PrefetchNextCyberNews
         _ = EnsureCyberWebAsync();
         // ShowCyberHot… 里若联网刷新，结束时会自己打开第一条；这里只在未刷新时补一次
         var willFetch = _cyberNews.CachedUnread.Count == 0 || _cyberNews.IsFetchDue;
@@ -3770,8 +3788,6 @@ public partial class MainWindow : Window
         BtnCyberNewsWeixin.Content = "分享";
         UpdateCyberFavButton();
         await NavigateCyberWebAsync(item.Link);
-        // 当前页展示时后台预载下一条，加快 → 切换
-        PrefetchNextCyberNews();
         // 仅首次打开详情时 Activate；连切新闻时抢焦点会让 WebView 停在旧页
         if (wasEmpty)
         {
@@ -3792,10 +3808,7 @@ public partial class MainWindow : Window
     {
         _cyberNewsOpen = null;
         _cyberWebTargetUrl = null;
-        _cyberPrefetchUrl = null;
-        _cyberPrefetchReady = false;
         _cyberWebNavEpoch++;
-        _cyberPrefetchEpoch++;
         try { _cyberNavCts?.Cancel(); } catch { /* ignore */ }
         CyberNewsDetailSource.Text = "→ 下一条 · ← 刷新 · ↓/空格下翻 · ↑/Shift+空格上翻";
         BtnCyberNewsFav.Content = "收藏";
@@ -3805,9 +3818,7 @@ public partial class MainWindow : Window
         CyberNewsWebHint.Text = "→ 下一条 · ← 刷新 · ↓/空格下翻 · ↑上翻";
         CyberNewsWebHint.Visibility = Visibility.Visible;
         CyberNewsWeb.Visibility = Visibility.Collapsed;
-        CyberNewsWebPrefetch.Visibility = Visibility.Collapsed;
         BlankCyberWeb(CyberNewsWeb);
-        BlankCyberWeb(CyberNewsWebPrefetch);
     }
 
     private static void BlankCyberWeb(Microsoft.Web.WebView2.Wpf.WebView2 web)
@@ -3823,17 +3834,11 @@ public partial class MainWindow : Window
 
     private void BtnCyberNewsNext_Click(object sender, RoutedEventArgs e) => OpenCyberNewsNext();
 
-    private Microsoft.Web.WebView2.Wpf.WebView2 CyberActiveWeb =>
-        _cyberWebFlipped ? CyberNewsWebPrefetch : CyberNewsWeb;
-
-    private Microsoft.Web.WebView2.Wpf.WebView2 CyberPrefetchWeb =>
-        _cyberWebFlipped ? CyberNewsWeb : CyberNewsWebPrefetch;
-
     /// <summary>详情页翻页：↓/空格 下翻，↑/Shift+空格 上翻。走 WM_MOUSEWHEEL，滑动曲线与鼠标滚轮相同。</summary>
     private void ScrollCyberNewsPage(bool forward)
     {
         if (_tab != TabMode.Cyber || _cyberNewsOpen == null) return;
-        var web = CyberActiveWeb;
+        var web = CyberNewsWeb;
         if (web.CoreWebView2 == null || web.Visibility != Visibility.Visible) return;
 
         // 按住方向键时系统会连发；略作间隔，避免一秒钟滚出十几格。
@@ -3946,65 +3951,6 @@ public partial class MainWindow : Window
             + "})(" + step + ")");
     }
 
-    /// <summary>当前列表里「下一条」候选（热点=未读头；收藏=下一项）。</summary>
-    private CyberNewsItem? PeekNextCyberNews()
-    {
-        if (_cyberListMode == CyberListMode.Hot)
-            return _cyberNews.CachedUnread.Count > 0 ? _cyberNews.CachedUnread[0] : null;
-
-        var favs = _cyberNews.Favorites;
-        if (favs.Count == 0) return null;
-        if (_cyberNewsOpen == null) return favs[0];
-        for (var i = 0; i < favs.Count - 1; i++)
-        {
-            if (string.Equals(favs[i].Id, _cyberNewsOpen.Id, StringComparison.OrdinalIgnoreCase))
-                return favs[i + 1];
-        }
-        return null;
-    }
-
-    /// <summary>后台 WebView 预载下一条链接（始终 Collapsed）。</summary>
-    private async void PrefetchNextCyberNews()
-    {
-        var next = PeekNextCyberNews();
-        var link = next?.Link?.Trim();
-        if (!IsHttpOrHttps(link))
-        {
-            _cyberPrefetchUrl = null;
-            _cyberPrefetchReady = false;
-            BlankCyberWeb(CyberPrefetchWeb);
-            return;
-        }
-
-        var safeLink = link!;
-        if (!string.IsNullOrEmpty(_cyberPrefetchUrl)
-            && UrlsLooselyMatch(_cyberPrefetchUrl, safeLink)
-            && _cyberPrefetchReady)
-            return;
-
-        var epoch = ++_cyberPrefetchEpoch;
-        _cyberPrefetchUrl = safeLink;
-        _cyberPrefetchReady = false;
-
-        try
-        {
-            await EnsureOneCyberWebAsync(CyberNewsWebPrefetch, isPrefetch: true);
-            if (epoch != _cyberPrefetchEpoch) return;
-            var web = CyberPrefetchWeb;
-            if (web.CoreWebView2 == null) return;
-            web.Visibility = Visibility.Collapsed;
-            try { web.CoreWebView2.Stop(); } catch { /* ignore */ }
-            var cur = web.CoreWebView2.Source ?? "";
-            if (UrlsLooselyMatch(cur, safeLink))
-            {
-                _cyberPrefetchReady = true;
-                return;
-            }
-            web.CoreWebView2.Navigate(safeLink);
-        }
-        catch { /* ignore */ }
-    }
-
     /// <summary>无详情 → 列表第一条；已有详情 → 下一条。</summary>
     private void OpenCyberNewsNext()
     {
@@ -4092,59 +4038,42 @@ public partial class MainWindow : Window
         OpenCyberNewsDetail(favs[idx + 1], dismissFromHot: false);
     }
 
-    /// <summary>只初始化主阅读 WebView；预载实例由 PrefetchNextCyberNews 单独拉起。</summary>
     private async Task EnsureCyberWebAsync()
     {
-        await EnsureOneCyberWebAsync(CyberNewsWeb, isPrefetch: false);
-    }
-
-    private async Task EnsureOneCyberWebAsync(Microsoft.Web.WebView2.Wpf.WebView2 web, bool isPrefetch)
-    {
-        if (isPrefetch)
-        {
-            if (_cyberPrefetchWebReady && web.CoreWebView2 != null) return;
-        }
-        else if (_cyberWebReady && web.CoreWebView2 != null) return;
-
+        if (_cyberWebReady && CyberNewsWeb.CoreWebView2 != null) return;
         try
         {
-            await web.EnsureCoreWebView2Async();
-            if (web.CoreWebView2 == null) return;
-            var settings = web.CoreWebView2.Settings;
-            settings.AreDefaultContextMenusEnabled = !isPrefetch;
+            await CyberNewsWeb.EnsureCoreWebView2Async();
+            if (CyberNewsWeb.CoreWebView2 == null) return;
+            var settings = CyberNewsWeb.CoreWebView2.Settings;
+            settings.AreDefaultContextMenusEnabled = true;
             settings.IsStatusBarEnabled = false;
             settings.AreDevToolsEnabled = false;
-            settings.IsZoomControlEnabled = !isPrefetch;
-            web.ZoomFactor = 1.0;
-            web.CoreWebView2.NewWindowRequested += (_, e) =>
+            settings.IsZoomControlEnabled = true;
+            CyberNewsWeb.ZoomFactor = 1.0;
+            CyberNewsWeb.CoreWebView2.NewWindowRequested += (_, e) =>
             {
                 e.Handled = true;
                 if (IsHttpOrHttps(e.Uri))
                     OpenExternalUrl(e.Uri);
             };
-
-            var hooked = isPrefetch ? _cyberPrefetchNavHooked : _cyberWebNavHooked;
-            if (!hooked)
+            if (!_cyberWebNavHooked)
             {
-                if (isPrefetch) _cyberPrefetchNavHooked = true;
-                else _cyberWebNavHooked = true;
-                web.CoreWebView2.NavigationCompleted += CyberWeb_NavigationCompleted;
-                _ = web.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(CyberPageCleaner.Script);
+                _cyberWebNavHooked = true;
+                CyberNewsWeb.CoreWebView2.NavigationCompleted += CyberWeb_NavigationCompleted;
+                _ = CyberNewsWeb.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(CyberPageCleaner.Script);
                 try
                 {
-                    await web.CoreWebView2.CallDevToolsProtocolMethodAsync(
+                    await CyberNewsWeb.CoreWebView2.CallDevToolsProtocolMethodAsync(
                         "Emulation.clearDeviceMetricsOverride", "{}");
                 }
                 catch { /* ignore */ }
             }
-
-            if (isPrefetch) _cyberPrefetchWebReady = true;
-            else _cyberWebReady = true;
+            _cyberWebReady = true;
         }
         catch
         {
-            if (isPrefetch) _cyberPrefetchWebReady = false;
-            else _cyberWebReady = false;
+            _cyberWebReady = false;
         }
     }
 
@@ -4157,19 +4086,9 @@ public partial class MainWindow : Window
             if (e.IsSuccess && sender is Microsoft.Web.WebView2.Core.CoreWebView2 core)
                 _ = core.ExecuteScriptAsync("window.__dwSweep&&window.__dwSweep()");
 
-            // 预载完成：只记就绪，不改 UI
-            if (ReferenceEquals(sender, CyberPrefetchWeb.CoreWebView2))
-            {
-                if (e.IsSuccess
-                    && !string.IsNullOrEmpty(_cyberPrefetchUrl)
-                    && UrlsLooselyMatch(CyberPrefetchWeb.CoreWebView2?.Source ?? "", _cyberPrefetchUrl))
-                    _cyberPrefetchReady = true;
-                return;
-            }
-
-            if (!ReferenceEquals(sender, CyberActiveWeb.CoreWebView2)) return;
+            if (!ReferenceEquals(sender, CyberNewsWeb.CoreWebView2)) return;
             if (_tab != TabMode.Cyber || _cyberNewsOpen == null) return;
-            var src = CyberActiveWeb.CoreWebView2?.Source;
+            var src = CyberNewsWeb.CoreWebView2?.Source;
             if (string.IsNullOrEmpty(src) || src.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
                 return;
             if (!string.IsNullOrEmpty(_cyberWebTargetUrl)
@@ -4179,8 +4098,7 @@ public partial class MainWindow : Window
             if (e.IsSuccess)
             {
                 CyberNewsWebHint.Visibility = Visibility.Collapsed;
-                CyberActiveWeb.Visibility = Visibility.Visible;
-                CyberPrefetchWeb.Visibility = Visibility.Collapsed;
+                CyberNewsWeb.Visibility = Visibility.Visible;
             }
             else
             {
@@ -4239,49 +4157,21 @@ public partial class MainWindow : Window
         await EnsureCyberWebAsync();
         if (epoch != _cyberWebNavEpoch) return;
 
-        // 预载命中：对调前后台 WebView，免重新 Navigate
-        if (!string.IsNullOrEmpty(_cyberPrefetchUrl)
-            && UrlsLooselyMatch(_cyberPrefetchUrl, target)
-            && CyberPrefetchWeb.CoreWebView2 != null)
-        {
-            _cyberWebFlipped = !_cyberWebFlipped;
-            _cyberPrefetchUrl = null;
-            _cyberPrefetchReady = false;
-            CyberPrefetchWeb.Visibility = Visibility.Collapsed;
-            CyberActiveWeb.Visibility = Visibility.Visible;
-            CyberActiveWeb.ZoomFactor = 1.0;
-
-            var src = CyberActiveWeb.CoreWebView2?.Source ?? "";
-            if (UrlsLooselyMatch(src, target)
-                && !src.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
-            {
-                CyberNewsWebHint.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                CyberNewsWebHint.Text = "加载中…";
-                CyberNewsWebHint.Visibility = Visibility.Visible;
-            }
-            return;
-        }
-
-        var active = CyberActiveWeb;
-        if (active.CoreWebView2 == null)
+        if (CyberNewsWeb.CoreWebView2 == null)
         {
             CyberNewsWebHint.Text = "WebView 不可用，请点「浏览器」打开";
             CyberNewsWebHint.Visibility = Visibility.Visible;
-            active.Visibility = Visibility.Collapsed;
+            CyberNewsWeb.Visibility = Visibility.Collapsed;
             return;
         }
 
         CyberNewsWebHint.Text = "加载中…";
         CyberNewsWebHint.Visibility = Visibility.Visible;
-        active.Visibility = Visibility.Visible;
-        CyberPrefetchWeb.Visibility = Visibility.Collapsed;
+        CyberNewsWeb.Visibility = Visibility.Visible;
         try
         {
-            var core = active.CoreWebView2;
-            active.ZoomFactor = 1.0;
+            var core = CyberNewsWeb.CoreWebView2;
+            CyberNewsWeb.ZoomFactor = 1.0;
             try { core.Stop(); } catch { /* ignore */ }
 
             var cur = core.Source ?? "";
@@ -5293,7 +5183,6 @@ public partial class MainWindow : Window
         _noteLoading = true;
         NoteEdit.Text = NoteFiles.JoinTitleBody(todo.Title, todo.Body);
         _noteLoading = false;
-        if (_notePreviewMode) _ = SetNotePreviewModeAsync(false);
         NoteEdit.Focus();
         NoteEdit.CaretIndex = NoteEdit.Text?.Length ?? 0;
 
@@ -5310,45 +5199,33 @@ public partial class MainWindow : Window
         DetachNoteWatcher();
     }
 
-    // ----- notes -----
+    // ----- notes（单文档，无标题列表） -----
+    private const string ScratchNoteId = "main";
+
     private void UpdateNoteChrome()
     {
-        if (_editingTodoId != null)
-        {
-            BtnAddTodoFromNote.Content = "完成编辑";
-            NoteListHost.Visibility = Visibility.Collapsed;
-        }
-        else
-        {
-            BtnAddTodoFromNote.Content = "加入待办";
-            NoteListHost.Visibility = Visibility.Visible;
-        }
+        BtnAddTodoFromNote.Content = _editingTodoId != null ? "完成编辑" : "加入待办";
     }
 
     private void EnsureActiveNote()
     {
-        var notes = _store.ListNotes();
-        if (notes.Count == 0)
-        {
-            var n = _store.CreateNote("未命名笔记", "");
-            _notes.Write(n.Id, "");
-            _activeNoteId = n.Id;
+        _activeNoteId = ScratchNoteId;
+        if (_store.GetNote(ScratchNoteId) is not null)
             return;
-        }
-        if (_activeNoteId == null || notes.All(n => n.Id != _activeNoteId))
-            _activeNoteId = notes[0].Id;
-    }
 
-    private void BtnNewNote_Click(object sender, RoutedEventArgs e)
-    {
-        FlushNoteSave();
-        ExitTodoEditMode();
-        var n = _store.CreateNote("未命名笔记", "");
-        _notes.Write(n.Id, "");
-        _activeNoteId = n.Id;
-        UpdateNoteChrome();
-        ReloadNoteList();
-        LoadActiveNote();
+        // 首次启用单文档：把最近一条旧笔记正文迁过来
+        string body = "";
+        var others = _store.ListNotes();
+        if (others.Count > 0)
+        {
+            body = _notes.Read(others[0].Id);
+            if (body.Length == 0)
+                body = others[0].Body ?? "";
+        }
+
+        _store.EnsureNote(ScratchNoteId, NoteFiles.TitleFromBody(body), body);
+        if (!System.IO.File.Exists(_notes.PathFor(ScratchNoteId)))
+            _notes.Write(ScratchNoteId, body);
     }
 
     private void BtnAddTodoFromNote_Click(object sender, RoutedEventArgs e)
@@ -5388,82 +5265,18 @@ public partial class MainWindow : Window
 
     private void ReloadNoteList()
     {
-        NoteList.Children.Clear();
-        if (_editingTodoId != null) return;
-
-        foreach (var note in _store.ListNotes())
-        {
-            var on = note.Id == _activeNoteId;
-            var chip = new Border
-            {
-                CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(8, 2, 6, 2),
-                Margin = new Thickness(0, 0, 4, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Background = on
-                    ? new SolidColorBrush(MediaColor.FromArgb(0x2E, 0x00, 0x78, 0xD4))
-                    : new SolidColorBrush(MediaColor.FromArgb(0x12, 0x00, 0x78, 0xD4)),
-                Cursor = WpfCursors.Hand,
-                Tag = note.Id,
-            };
-            var title = string.IsNullOrWhiteSpace(note.Title) ? "未命名笔记" : note.Title;
-            var sp = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
-            sp.Children.Add(new TextBlock
-            {
-                Text = title.Length > 10 ? title[..10] + "…" : title,
-                VerticalAlignment = VerticalAlignment.Center,
-                FontSize = 11,
-                Foreground = on ? (MediaBrush)FindResource("Accent") : (MediaBrush)FindResource("Fg"),
-                FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal,
-            });
-            var del = new TextBlock
-            {
-                Text = " ×",
-                FontSize = 11,
-                Foreground = (MediaBrush)FindResource("Muted"),
-                VerticalAlignment = VerticalAlignment.Center,
-                Opacity = 0.55,
-            };
-            del.MouseLeftButtonUp += (_, e) =>
-            {
-                e.Handled = true;
-                DeleteNote(note.Id);
-            };
-            sp.Children.Add(del);
-            chip.Child = sp;
-            chip.MouseLeftButtonUp += (_, _) =>
-            {
-                FlushNoteSave();
-                ExitTodoEditMode();
-                _activeNoteId = note.Id;
-                UpdateNoteChrome();
-                ReloadNoteList();
-                LoadActiveNote();
-            };
-            NoteList.Children.Add(chip);
-        }
-    }
-
-    private void DeleteNote(string id)
-    {
-        FlushNoteSave();
-        _store.SoftDeleteNote(id);
-        _notes.Delete(id);
-        if (_activeNoteId == id) _activeNoteId = null;
-        EnsureActiveNote();
-        ReloadNoteList();
-        LoadActiveNote();
+        // 单文档：不再渲染标题 chip
     }
 
     private void LoadActiveNote()
     {
         if (_editingTodoId != null) return;
+        EnsureActiveNote();
         if (_activeNoteId == null)
         {
             _noteLoading = true;
             NoteEdit.Text = "";
             _noteLoading = false;
-            if (_notePreviewMode) _ = RefreshNotePreviewAsync();
             return;
         }
 
@@ -5477,7 +5290,6 @@ public partial class MainWindow : Window
         _noteLoading = true;
         NoteEdit.Text = body;
         _noteLoading = false;
-        if (_notePreviewMode) _ = RefreshNotePreviewAsync();
     }
 
     private void BtnNotepad_Click(object sender, RoutedEventArgs e)
@@ -5516,133 +5328,76 @@ public partial class MainWindow : Window
         _noteSaveTimer.Start();
     }
 
-    private void NoteModeEdit_Click(object sender, MouseButtonEventArgs e)
-    {
-        _ = SetNotePreviewModeAsync(false);
-    }
+    private static string NoteWidthPrefPath =>
+        System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "DeskWidgets",
+            "note-width.pref");
 
-    private void NoteModePreview_Click(object sender, MouseButtonEventArgs e)
+    private void LoadNoteWidthPref()
     {
-        _ = SetNotePreviewModeAsync(true);
-    }
-
-    private void StyleNoteModeTabs()
-    {
-        var accent = (MediaBrush)FindResource("Accent");
-        var muted = (MediaBrush)FindResource("Muted");
-        var fg = (MediaBrush)FindResource("Fg");
-        NoteModeEdit.BorderBrush = _notePreviewMode ? MediaBrushes.Transparent : accent;
-        NoteModePreview.BorderBrush = _notePreviewMode ? accent : MediaBrushes.Transparent;
-        NoteModeEditText.Foreground = _notePreviewMode ? muted : fg;
-        NoteModePreviewText.Foreground = _notePreviewMode ? fg : muted;
-    }
-
-    private async Task SetNotePreviewModeAsync(bool preview)
-    {
-        if (preview == _notePreviewMode && preview)
-        {
-            await RefreshNotePreviewAsync();
-            return;
-        }
-        _notePreviewMode = preview;
-        StyleNoteModeTabs();
-        if (!preview)
-        {
-            NotePreview.Visibility = Visibility.Collapsed;
-            NoteEdit.Visibility = Visibility.Visible;
-            NoteEdit.Focus();
-            return;
-        }
-
-        FlushNoteSave();
-        NoteEdit.Visibility = Visibility.Collapsed;
-        _inputFocused = false;
         try
         {
-            await RefreshNotePreviewAsync();
-            NotePreview.Visibility = Visibility.Visible;
+            var path = NoteWidthPrefPath;
+            if (!System.IO.File.Exists(path)) return;
+            var raw = System.IO.File.ReadAllText(path).Trim();
+            _noteWide = string.Equals(raw, "wide", StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception ex)
+        catch { /* keep default narrow */ }
+    }
+
+    private void SaveNoteWidthPref()
+    {
+        try
         {
-            _notePreviewMode = false;
-            StyleNoteModeTabs();
-            NoteEdit.Visibility = Visibility.Visible;
-            NotePreview.Visibility = Visibility.Collapsed;
-            NoteEdit.Focus();
-            System.Diagnostics.Debug.WriteLine("Note preview: " + ShortErr(ex));
+            var dir = System.IO.Path.GetDirectoryName(NoteWidthPrefPath)!;
+            Directory.CreateDirectory(dir);
+            System.IO.File.WriteAllText(NoteWidthPrefPath, _noteWide ? "wide" : "narrow");
         }
+        catch { /* ignore */ }
     }
 
-    private async Task RefreshNotePreviewAsync()
+    private void BtnNoteWidth_Click(object sender, RoutedEventArgs e)
     {
-        await EnsureNotePreviewAsync();
-        if (NotePreview.CoreWebView2 == null)
-            throw new InvalidOperationException("WebView2 初始化失败");
-        var md = NoteEdit.Text ?? "";
-        var body = string.IsNullOrWhiteSpace(md)
-            ? "<p style=\"color:#8A8A8A\">空笔记</p>"
-            : AgentMarkdownToHtml(md);
-        NotePreview.NavigateToString(WrapNoteMarkdownHtml(body));
+        SetNoteWide(!_noteWide);
     }
 
-    private async Task EnsureNotePreviewAsync()
+    private void SetNoteWide(bool wide)
     {
-        if (_notePreviewReady && NotePreview.CoreWebView2 != null) return;
-        await NotePreview.EnsureCoreWebView2Async();
-        if (NotePreview.CoreWebView2 == null)
-            throw new InvalidOperationException("WebView2 初始化失败");
-        var settings = NotePreview.CoreWebView2.Settings;
-        settings.IsStatusBarEnabled = false;
-        settings.AreDevToolsEnabled = false;
-        settings.AreDefaultContextMenusEnabled = false;
-        settings.IsZoomControlEnabled = false;
-        if (!_notePreviewHooksBound)
+        if (_noteWide == wide)
         {
-            _notePreviewHooksBound = true;
-            NotePreview.CoreWebView2.NavigationStarting += NotePreview_NavigationStarting;
-            NotePreview.CoreWebView2.NewWindowRequested += (_, e) =>
-            {
-                e.Handled = true;
-                if (IsHttpOrHttps(e.Uri))
-                    OpenExternalUrl(e.Uri);
-            };
-        }
-        _notePreviewReady = true;
-    }
-
-    private void NotePreview_NavigationStarting(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs e)
-    {
-        var uri = e.Uri ?? "";
-        if (uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
-            || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
-            || string.IsNullOrEmpty(uri))
+            UpdateNoteWidthButton();
             return;
-        e.Cancel = true;
-        if (IsHttpOrHttps(uri))
-            OpenExternalUrl(uri);
+        }
+        var wasWide = _noteWide;
+        _noteWide = wide;
+        SaveNoteWidthPref();
+        UpdateNoteWidthButton();
+        if (_expanded && _tab == TabMode.Note)
+            PlaceExpanded();
+        // 宽→窄：鼠标常还在原加宽区域，先锁自动隐藏
+        if (wasWide && !wide && _expanded && !_pinned)
+        {
+            _awaitPanelEnter = true;
+            _leaveSince = null;
+        }
     }
 
-    private static string WrapNoteMarkdownHtml(string bodyHtml) =>
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>" +
-        "<style>" +
-        "html,body{margin:0;padding:0;background:#fff;}" +
-        "body{font-family:\"Microsoft YaHei UI\",Segoe UI,sans-serif;font-size:15px;" +
-        "line-height:1.55;color:#1a1a1a;padding:2px 4px;}" +
-        "h1,h2,h3,h4{margin:0.8em 0 0.35em;line-height:1.3;font-weight:600;}" +
-        "h1{font-size:1.35em;}h2{font-size:1.2em;}h3{font-size:1.08em;}" +
-        "p{margin:0 0 0.65em;}ul,ol{margin:0.2em 0 0.65em;padding-left:1.35em;}" +
-        "li{margin:0.15em 0;}blockquote{margin:0.4em 0;padding:0.2em 0.8em;" +
-        "border-left:3px solid #D0D0D5;color:#555;}" +
-        "code{font-family:Cascadia Mono,Consolas,monospace;font-size:0.92em;" +
-        "background:#F3F3F5;padding:0.1em 0.35em;border-radius:4px;}" +
-        "pre{background:#F3F3F5;padding:10px 12px;border-radius:8px;overflow:auto;}" +
-        "pre code{background:transparent;padding:0;}" +
-        "a{color:#2563EB;text-decoration:none;}a:hover{text-decoration:underline;}" +
-        "table{border-collapse:collapse;margin:0.5em 0;}th,td{border:1px solid #E5E5EA;" +
-        "padding:4px 8px;}th{background:#F7F7F9;}" +
-        "hr{border:none;border-top:1px solid #E5E5EA;margin:1em 0;}" +
-        "img{max-width:100%;}" +
-        "</style></head><body>" + bodyHtml + "</body></html>";
+    private void UpdateNoteWidthButton()
+    {
+        if (_noteWide)
+        {
+            NoteWidthIcon.Kind = MaterialDesignThemes.Wpf.PackIconKind.ArrowCollapseHorizontal;
+            NoteWidthLabel.Text = "收窄";
+            BtnNoteWidth.ToolTip = "收成窄栏（与待办同宽）";
+        }
+        else
+        {
+            NoteWidthIcon.Kind = MaterialDesignThemes.Wpf.PackIconKind.ArrowExpandHorizontal;
+            NoteWidthLabel.Text = "加宽";
+            BtnNoteWidth.ToolTip = "展开为宽栏（与邮件详情同宽）";
+        }
+    }
 
     private void NoteSaveTick(object? sender, EventArgs e)
     {
@@ -5651,11 +5406,9 @@ public partial class MainWindow : Window
         FlushNoteSave();
     }
 
-    /// <summary>离开当前笔记时再刷新标题 chip（编辑过程中不调用）。</summary>
     private void RefreshNoteChipTitlesIfNeeded()
     {
-        if (_editingTodoId != null || _tab != TabMode.Note) return;
-        ReloadNoteList();
+        // 单文档：无标题 chip
     }
 
     private void FlushNoteSave()
@@ -5678,13 +5431,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        EnsureActiveNote();
         if (_activeNoteId == null) return;
-        var titleN = NoteFiles.TitleFromBody(body);
         _noteWriting = true;
         try
         {
             _notes.Write(_activeNoteId, body);
-            _store.SaveNote(_activeNoteId, titleN, body);
+            _store.SaveNote(_activeNoteId, NoteFiles.TitleFromBody(body), body);
         }
         finally { _noteWriting = false; }
     }
@@ -5736,7 +5489,6 @@ public partial class MainWindow : Window
         NoteEdit.Text = text;
         _noteLoading = false;
         NoteEdit.CaretIndex = Math.Clamp(caret, 0, NoteEdit.Text?.Length ?? 0);
-        if (_notePreviewMode) _ = RefreshNotePreviewAsync();
         FlushNoteSave();
     }
 

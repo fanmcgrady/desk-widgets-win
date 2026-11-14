@@ -60,6 +60,20 @@ public sealed class CursorAgentClient
         }
     }
 
+    /// <summary>WSL 提示词和启动脚本放在应用数据目录，避免出现在工作区根目录。</summary>
+    private static string AgentRunDir
+    {
+        get
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "DeskWidgets",
+                "agent-run");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+    }
+
     public AgentRuntimeKind RuntimeKind => _kind;
 
     /// <summary>是否已完成路径探测（异步）。</summary>
@@ -323,11 +337,14 @@ public sealed class CursorAgentClient
     {
         var winWorkspace = WorkspaceDir;
         var wslWorkspace = ToWslPath(winWorkspace);
+        DeleteIfExists(Path.Combine(winWorkspace, ".last-prompt.txt"));
+        DeleteIfExists(Path.Combine(winWorkspace, ".run-agent.sh"));
 
-        var promptFile = Path.Combine(winWorkspace, ".last-prompt.txt");
+        var runDir = AgentRunDir;
+        var promptFile = Path.Combine(runDir, "last-prompt.txt");
         await File.WriteAllTextAsync(promptFile, prompt, new UTF8Encoding(false), ct).ConfigureAwait(false);
 
-        var scriptFile = Path.Combine(winWorkspace, ".run-agent.sh");
+        var scriptFile = Path.Combine(runDir, "run-agent.sh");
         var script = BuildWslRunScript(wslWorkspace, ToWslPath(promptFile), continueSession, mode);
         await File.WriteAllTextAsync(scriptFile, script, new UTF8Encoding(false), ct).ConfigureAwait(false);
 
@@ -447,6 +464,18 @@ public sealed class CursorAgentClient
         sb.Append(cont);
         sb.Append(" -- \"$PROMPT\"\n");
         return sb.ToString();
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            /* 被占用时下次再删 */
+        }
     }
 
     public static string ToWslPath(string winPath)

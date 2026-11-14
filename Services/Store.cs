@@ -539,11 +539,22 @@ public sealed class Store
         };
     }
 
-    public NoteItem CreateNote(string? title = null, string? body = null)
+    public NoteItem CreateNote(string? title = null, string? body = null) =>
+        UpsertNote(NewId(), title, body);
+
+    /// <summary>按固定 id 确保一条笔记存在（单文档模式用）。</summary>
+    public NoteItem EnsureNote(string id, string? title = null, string? body = null)
+    {
+        var existing = GetNote(id);
+        if (existing is not null) return existing;
+        return UpsertNote(id, title, body);
+    }
+
+    private NoteItem UpsertNote(string id, string? title, string? body)
     {
         var note = new NoteItem
         {
-            Id = NewId(),
+            Id = id,
             Title = string.IsNullOrWhiteSpace(title) ? "未命名笔记" : title.Trim(),
             Body = body ?? "",
             UpdatedAt = NowMs(),
@@ -554,6 +565,11 @@ public sealed class Store
             """
             INSERT INTO notes(id, title, body, updated_at, deleted)
             VALUES($id,$title,$body,$ts,0)
+            ON CONFLICT(id) DO UPDATE SET
+              title=excluded.title,
+              body=excluded.body,
+              updated_at=excluded.updated_at,
+              deleted=0
             """;
         cmd.Parameters.AddWithValue("$id", note.Id);
         cmd.Parameters.AddWithValue("$title", note.Title);

@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        xmlns:desktopBox="clr-namespace:DesktopBox;assembly=DesktopBox"
         Title="工作区"
         WindowStyle="None"
         AllowsTransparency="False"
@@ -55,6 +56,28 @@
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="bd" Property="Opacity" Value="0.9"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="WhiteBtn" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="Foreground" Value="{StaticResource Fg}"/>
+      <Setter Property="Padding" Value="12,0"/>
+      <Setter Property="Height" Value="30"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="#18000000" BorderThickness="1"
+                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#FFF7F7F7"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -226,7 +249,7 @@
         </Border>
         <Border x:Name="TabFileBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 · Ctrl+6 · Alt+空格">
+                MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 / 桌面分区 · Ctrl+6 · Alt+空格">
           <TextBlock x:Name="TabFileText" Text="文件" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
@@ -396,11 +419,6 @@
                     <wv2:WebView2 x:Name="CyberNewsWeb"
                                   DefaultBackgroundColor="#FFF7F7F7"
                                   Visibility="Collapsed"/>
-                    <!-- 后台预载下一条，切换时与主 WebView 对调 -->
-                    <wv2:WebView2 x:Name="CyberNewsWebPrefetch"
-                                  DefaultBackgroundColor="#FFF7F7F7"
-                                  Visibility="Collapsed"
-                                  IsHitTestVisible="False"/>
                   </Grid>
                 </Border>
               </DockPanel>
@@ -440,54 +458,42 @@
           </Grid>
         </DockPanel>
 
-        <!-- 笔记（Markdown 源码编辑 + 预览） -->
+        <!-- 笔记：单文档纯文本，无标题列表 -->
         <DockPanel x:Name="NotePanel">
-          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" Height="24">
-            <Button Content="+ 新建" Foreground="{StaticResource Accent}" FontSize="12"
-                    Click="BtnNewNote_Click"/>
-            <StackPanel Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
-              <Border x:Name="NoteModeEdit" BorderThickness="0,0,0,2" BorderBrush="{StaticResource Accent}"
-                      Margin="0,0,10,0" Cursor="Hand" Padding="0,0,0,3"
-                      MouseLeftButtonUp="NoteModeEdit_Click">
-                <TextBlock x:Name="NoteModeEditText" Text="编辑" FontSize="12"/>
-              </Border>
-              <Border x:Name="NoteModePreview" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                      Cursor="Hand" Padding="0,0,0,3"
-                      MouseLeftButtonUp="NoteModePreview_Click">
-                <TextBlock x:Name="NoteModePreviewText" Text="预览" FontSize="12"
-                           Foreground="{StaticResource Muted}"/>
-              </Border>
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" Height="24" LastChildFill="False">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button x:Name="BtnNoteWidth" Click="BtnNoteWidth_Click"
+                      Padding="10,2" Height="24" MinWidth="56" Margin="0,0,8,0"
+                      VerticalAlignment="Center" ToolTip="切换笔记栏宽窄">
+                <StackPanel Orientation="Horizontal">
+                  <materialDesign:PackIcon x:Name="NoteWidthIcon" Kind="ArrowExpandHorizontal"
+                                           Width="16" Height="16" VerticalAlignment="Center"
+                                           Foreground="{StaticResource Accent}"/>
+                  <TextBlock x:Name="NoteWidthLabel" Text="加宽" FontSize="12" Margin="4,0,0,0"
+                             Foreground="{StaticResource Accent}" VerticalAlignment="Center"
+                             FontWeight="SemiBold"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="BtnAddTodoFromNote" Content="加入待办"
+                      Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
+                      Click="BtnAddTodoFromNote_Click"/>
             </StackPanel>
-            <Button x:Name="BtnAddTodoFromNote" Content="加入待办"
-                    HorizontalAlignment="Right"
-                    Foreground="{StaticResource Accent}" FontWeight="SemiBold" FontSize="12"
-                    Click="BtnAddTodoFromNote_Click"/>
           </DockPanel>
-          <ScrollViewer x:Name="NoteListHost" DockPanel.Dock="Top" Height="26"
-                        HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
-                        Margin="0,0,0,6">
-            <StackPanel x:Name="NoteList" Orientation="Horizontal"/>
-          </ScrollViewer>
           <Button x:Name="BtnNotepad" DockPanel.Dock="Bottom"
-                  Content="用记事本打开" Style="{StaticResource PrimaryBtn}"
+                  Content="用记事本打开" Style="{StaticResource WhiteBtn}"
                   Height="34" Margin="0,8,0,0" FontSize="13"
                   Click="BtnNotepad_Click"/>
           <Border Background="White" CornerRadius="8" Padding="10,8"
                   BorderBrush="#10000000" BorderThickness="1">
-            <Grid>
-              <TextBox x:Name="NoteEdit"
-                       AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap"
-                       VerticalScrollBarVisibility="Auto"
-                       BorderThickness="0" Background="Transparent"
-                       FontSize="15.5" Padding="0"
-                       GotKeyboardFocus="Input_GotFocus"
-                       LostKeyboardFocus="Input_LostFocus"
-                       PreviewKeyDown="NoteEdit_PreviewKeyDown"
-                       TextChanged="NoteEdit_TextChanged"
-                       ToolTip="支持 Markdown：标题、列表、链接、代码块等"/>
-              <wv2:WebView2 x:Name="NotePreview" Visibility="Collapsed"
-                            DefaultBackgroundColor="White"/>
-            </Grid>
+            <TextBox x:Name="NoteEdit"
+                     AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     BorderThickness="0" Background="Transparent"
+                     FontSize="15.5" Padding="0"
+                     GotKeyboardFocus="Input_GotFocus"
+                     LostKeyboardFocus="Input_LostFocus"
+                     PreviewKeyDown="NoteEdit_PreviewKeyDown"
+                     TextChanged="NoteEdit_TextChanged"/>
           </Border>
         </DockPanel>
 
@@ -715,29 +721,33 @@
           </Grid>
         </DockPanel>
 
-        <!-- 文件：Everything 搜索 -->
+        <!-- 文件：上 Everything 搜索，下 DesktopBox 配置（压缩） -->
         <DockPanel x:Name="FilePanel" Visibility="Collapsed">
-          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="True">
-            <Button x:Name="BtnEverythingStart" DockPanel.Dock="Right" Content="启动"
-                    Style="{StaticResource PrimaryBtn}" Height="32" Margin="8,0,0,0"
-                    Click="BtnEverythingStart_Click" Visibility="Collapsed"
-                    ToolTip="启动 Everything 到托盘"/>
-            <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
-                    Padding="10,0">
-              <TextBox x:Name="FileSearchBox" Style="{StaticResource PlainInput}" Height="32"
-                       FontSize="13" ToolTip="回车选中第一条，上下移动，再回车打开。例如 *.pdf"
-                       TextChanged="FileSearchBox_TextChanged"
-                       PreviewKeyDown="FileSearchBox_PreviewKeyDown"
-                       GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+          <desktopBox:FenceSettingsPanel x:Name="FenceSettings" DockPanel.Dock="Bottom"
+                                         MaxHeight="220" Margin="0,8,0,0"/>
+          <DockPanel>
+            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="True">
+              <Button x:Name="BtnEverythingStart" DockPanel.Dock="Right" Content="启动"
+                      Style="{StaticResource PrimaryBtn}" Height="32" Margin="8,0,0,0"
+                      Click="BtnEverythingStart_Click" Visibility="Collapsed"
+                      ToolTip="启动 Everything 到托盘"/>
+              <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1"
+                      Padding="10,0">
+                <TextBox x:Name="FileSearchBox" Style="{StaticResource PlainInput}" Height="32"
+                         FontSize="13" ToolTip="回车选中第一条，上下移动，再回车打开。例如 *.pdf"
+                         TextChanged="FileSearchBox_TextChanged"
+                         PreviewKeyDown="FileSearchBox_PreviewKeyDown"
+                         GotKeyboardFocus="Input_GotFocus" LostKeyboardFocus="Input_LostFocus"/>
+              </Border>
+            </DockPanel>
+            <TextBlock x:Name="FileSearchHint" DockPanel.Dock="Top" Margin="2,0,0,6"
+                       FontSize="11" Foreground="{StaticResource Muted}" Text="输入文件名"/>
+            <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="FileSearchList"/>
+              </ScrollViewer>
             </Border>
           </DockPanel>
-          <TextBlock x:Name="FileSearchHint" DockPanel.Dock="Top" Margin="2,0,0,6"
-                     FontSize="11" Foreground="{StaticResource Muted}" Text="输入文件名"/>
-          <Border Background="White" CornerRadius="8" BorderBrush="#10000000" BorderThickness="1">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-              <StackPanel x:Name="FileSearchList"/>
-            </ScrollViewer>
-          </Border>
         </DockPanel>
 
         <!-- 大模型：固定 Agent 模式 -->
