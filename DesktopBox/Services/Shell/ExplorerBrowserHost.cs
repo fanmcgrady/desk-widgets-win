@@ -28,6 +28,8 @@ internal sealed class ExplorerBrowserHost : HwndHost
     private int _lastViewW = -1;
     private int _lastViewH = -1;
     private int _lastColumnsW = -1;
+    private bool _recreating;
+    private string? _pendingNavigate;
 
     /// <summary>当前路径变化（区内导航）。</summary>
     public event EventHandler<string>? Navigated;
@@ -270,9 +272,40 @@ internal sealed class ExplorerBrowserHost : HwndHost
             _currentPath = full;
 
         if (_hostReady)
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => RecreateView(full));
+            QueueRecreate(full);
         else
             _currentPath = full;
+    }
+
+    private void QueueRecreate(string folder)
+    {
+        // 合并连点：重建中只保留最后目标，避免重叠 Destroy/Create 崩进程
+        if (_recreating)
+        {
+            _pendingNavigate = folder;
+            Log($"recreate busy; pending={folder}");
+            return;
+        }
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            try
+            {
+                RecreateView(folder);
+            }
+            catch (Exception ex)
+            {
+                Log($"RecreateView exception: {ex}");
+            }
+            finally
+            {
+                var next = _pendingNavigate;
+                _pendingNavigate = null;
+                if (!string.IsNullOrWhiteSpace(next)
+                    && !string.Equals(next, _currentPath, StringComparison.OrdinalIgnoreCase))
+                    QueueRecreate(next);
+            }
+        });
     }
 
     public void GoUp()
@@ -330,17 +363,7 @@ internal sealed class ExplorerBrowserHost : HwndHost
         _hostReady = true;
 
         // 必须延后：CreateViewWindow 会泵消息，不能在 BuildWindowCore 里跑
-        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
-        {
-            try
-            {
-                RecreateView(_currentPath);
-            }
-            catch (Exception ex)
-            {
-                Log($"CreateView exception: {ex}");
-            }
-        });
+        QueueRecreate(_currentPath);
 
         return new HandleRef(this, _hwndHost);
     }
@@ -348,16 +371,22 @@ internal sealed class ExplorerBrowserHost : HwndHost
     private void OnBrowseRequested(IntPtr pidl, uint wFlags)
     {
         Log($"BrowseObject flags=0x{wFlags:X8}");
-        // CreateViewWindow/Browse 可能在 Shell 回调里，延后到 Dispatcher
+        // Shell 回调里的 pidl 返回后即失效，必须先克隆再丢给 Dispatcher
+        var clone = pidl != IntPtr.Zero ? ShellViewNative.ILClone(pidl) : IntPtr.Zero;
         Dispatcher.BeginInvoke(DispatcherPriority.Normal, () =>
         {
             try
             {
-                HandleBrowseObject(pidl, wFlags);
+                HandleBrowseObject(clone, wFlags);
             }
             catch (Exception ex)
             {
                 Log($"BrowseObject failed: {ex.GetType().Name} {ex.Message}");
+            }
+            finally
+            {
+                if (clone != IntPtr.Zero)
+                    ShellNative.ILFree(clone);
             }
         });
     }
@@ -429,8 +458,14 @@ internal sealed class ExplorerBrowserHost : HwndHost
                 return false;
             }
 
+            // 不能在 Shell 回调栈上 DestroyView/CreateViewWindow，否则易原生崩（BEX64/0xc0000409）
             Log($"OnDefaultCommand: in-place -> {path}");
-            Navigate(path);
+            var target = path;
+            Dispatcher.BeginInvoke(DispatcherPriority.Normal, () =>
+            {
+                try { Navigate(target); }
+                catch (Exception ex) { Log($"OnDefaultCommand navigate failed: {ex.Message}"); }
+            });
             return true;
         }
         catch (Exception ex)
@@ -676,7 +711,25 @@ internal sealed class ExplorerBrowserHost : HwndHost
     {
         if (_hwndHost == IntPtr.Zero || _browser is null)
             return;
+        if (_recreating)
+        {
+            _pendingNavigate = folder;
+            return;
+        }
 
+        _recreating = true;
+        try
+        {
+            RecreateViewCore(folder);
+        }
+        finally
+        {
+            _recreating = false;
+        }
+    }
+
+    private void RecreateViewCore(string folder)
+    {
         DestroyView();
         Directory.CreateDirectory(folder);
 

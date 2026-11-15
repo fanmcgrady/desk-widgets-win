@@ -39,7 +39,7 @@
             Grid.Row="1"
             Margin="0" />
 
-      <!-- 内存区底部：CPU / 流量 / 开机 / Wi‑Fi -->
+      <!-- 内存区底部：Cursor 用量 / 流量 / 开机 / Wi‑Fi -->
       <Border x:Name="StatsPanel"
               Grid.Row="2"
               Visibility="Collapsed"
@@ -51,12 +51,15 @@
               ClipToBounds="False">
         <UniformGrid Columns="4" Rows="1">
           <StackPanel Margin="0,0,10,0">
-            <TextBlock Text="CPU" FontSize="10" Foreground="#FF999999"/>
-            <TextBlock x:Name="StatsCpu" Text="—" FontSize="15" FontWeight="SemiBold"
+            <TextBlock Text="Cursor" FontSize="10" Foreground="#FF999999"/>
+            <TextBlock x:Name="StatsCursor" Text="—" FontSize="15" FontWeight="SemiBold"
                        Foreground="#FF333333" Margin="0,2,0,0"/>
-            <Border x:Name="StatsCpuTrack" Height="3" Background="#14000000"
+            <TextBlock x:Name="StatsCursorHint" Text="" FontSize="10"
+                       Foreground="#FFAAAAAA" Margin="0,1,0,0"
+                       TextTrimming="CharacterEllipsis"/>
+            <Border x:Name="StatsCursorTrack" Height="3" Background="#14000000"
                     CornerRadius="1" Margin="0,6,0,0">
-              <Border x:Name="StatsCpuBar" Height="3" HorizontalAlignment="Left"
+              <Border x:Name="StatsCursorBar" Height="3" HorizontalAlignment="Left"
                       Background="#FF0078D4" CornerRadius="1" Width="0"/>
             </Border>
           </StackPanel>

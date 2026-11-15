@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -6,34 +5,24 @@ using System.Windows.Threading;
 
 namespace DesktopBox.Services;
 
-/// <summary>按秒采样 CPU / 流量 / Wi‑Fi / 开机。</summary>
+/// <summary>采样 Cursor 用量 / 流量 / Wi‑Fi / 开机。</summary>
 internal sealed class SystemStatsService : IDisposable
 {
     private readonly DispatcherTimer _timer;
-    private readonly PerformanceCounter? _cpu;
     private long _prevRecv = -1;
     private long _prevSent = -1;
     private DateTime _prevUtc = DateTime.MinValue;
     private bool _started;
-    private bool _cpuPrimed;
+    private int _tick;
+    private WifiInfo _lastWifi = WifiInfo.Unavailable;
 
     public event EventHandler<SystemStatsSample>? Sampled;
 
     public SystemStatsService()
     {
-        try
-        {
-            _cpu = new PerformanceCounter("Processor", "% Processor Time", "_Total");
-            _cpu.NextValue();
-        }
-        catch
-        {
-            _cpu = null;
-        }
-
         _timer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromSeconds(1)
+            Interval = PowerBudget.StatsInterval
         };
         _timer.Tick += (_, _) => Tick();
     }
@@ -44,7 +33,10 @@ internal sealed class SystemStatsService : IDisposable
         _started = true;
         SnapshotNet(out _prevRecv, out _prevSent);
         _prevUtc = DateTime.UtcNow;
-        _cpuPrimed = false;
+        _tick = 0;
+        _timer.Interval = PowerBudget.StatsInterval;
+        // 启动立刻拉一次用量（后台）
+        _ = CursorUsageService.PeekAndRefresh();
         _timer.Start();
     }
 
@@ -60,18 +52,25 @@ internal sealed class SystemStatsService : IDisposable
     {
         Stop();
         Sampled = null;
-        _cpu?.Dispose();
     }
 
     private void Tick()
     {
         try
         {
-            var cpu = ReadCpu();
-            var wifi = ReadWifiSafe();
+            // 市电/电池切换时跟着改间隔
+            var want = PowerBudget.StatsInterval;
+            if (_timer.Interval != want)
+                _timer.Interval = want;
+
+            var usage = CursorUsageService.PeekAndRefresh();
+            // WLAN API 偏重：电池下隔几次才查
+            var n = Math.Max(1, PowerBudget.WifiEveryNTicks);
+            if (_tick++ % n == 0)
+                _lastWifi = ReadWifiSafe();
             ReadNetRates(out var down, out var up);
             var uptime = TimeSpan.FromMilliseconds(GetTickCount64());
-            Sampled?.Invoke(this, new SystemStatsSample(cpu, down, up, wifi, uptime));
+            Sampled?.Invoke(this, new SystemStatsSample(usage, down, up, _lastWifi, uptime));
         }
         catch
         {
@@ -83,25 +82,6 @@ internal sealed class SystemStatsService : IDisposable
     {
         try { return ReadWifi(); }
         catch { return WifiInfo.Unavailable; }
-    }
-
-    private double ReadCpu()
-    {
-        if (_cpu is null) return -1;
-        try
-        {
-            var v = _cpu.NextValue();
-            if (!_cpuPrimed)
-            {
-                _cpuPrimed = true;
-                return -1;
-            }
-            return Math.Clamp(v, 0, 100);
-        }
-        catch
-        {
-            return -1;
-        }
     }
 
     private static WifiInfo ReadWifi()
@@ -337,7 +317,7 @@ internal readonly record struct WifiInfo(bool Connected, int SignalPercent, stri
 }
 
 internal readonly record struct SystemStatsSample(
-    double CpuPercent,
+    CursorUsageInfo Cursor,
     double DownBytesPerSec,
     double UpBytesPerSec,
     WifiInfo Wifi,

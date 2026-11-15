@@ -112,8 +112,10 @@ public partial class ZoneView : System.Windows.Controls.UserControl
 
         StatsPanel.Visibility = Visibility.Collapsed;
         StatsRow.Height = new GridLength(0);
-        StatsCpu.Text = "—";
-        StatsCpuBar.Width = 0;
+        StatsCursor.Text = "—";
+        StatsCursorHint.Text = "";
+        StatsCursorBar.Width = 0;
+        StatsCursorBar.Background = CreateFrozenBrush(0x00, 0x78, 0xD4);
         StatsNetDown.Text = "↓ —";
         StatsNetUp.Text = "↑ —";
         StatsUptime.Text = "—";
@@ -129,25 +131,50 @@ public partial class ZoneView : System.Windows.Controls.UserControl
     private static readonly SolidColorBrush WifiBarRed = CreateFrozenBrush(0xE8, 0x11, 0x23);
     private static readonly SolidColorBrush WifiBarGray = CreateFrozenBrush(0xA0, 0xA0, 0xA0);
     private static readonly SolidColorBrush WifiTextMuted = CreateFrozenBrush(0x99, 0x99, 0x99);
+    private static readonly SolidColorBrush CursorBarBlue = CreateFrozenBrush(0x00, 0x78, 0xD4);
 
     private void OnStatsSampled(object? sender, SystemStatsSample sample)
     {
-        if (sample.CpuPercent < 0)
-            StatsCpu.Text = "—";
-        else
-        {
-            StatsCpu.Text = $"{sample.CpuPercent:0}%";
-            var track = Math.Max(0, StatsCpuTrack.ActualWidth);
-            if (track < 1)
-                track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
-            StatsCpuBar.Width = track * Math.Clamp(sample.CpuPercent / 100.0, 0, 1);
-        }
-
+        ApplyCursorUsageUi(sample.Cursor);
         StatsNetDown.Text = "↓ " + SystemStatsService.FormatRate(sample.DownBytesPerSec);
         StatsNetUp.Text = "↑ " + SystemStatsService.FormatRate(sample.UpBytesPerSec);
         StatsUptime.Text = SystemStatsService.FormatUptime(sample.Uptime);
         StatsClock.Text = DateTime.Now.ToString("MM-dd HH:mm:ss");
         ApplyWifiUi(sample.Wifi);
+    }
+
+    private void ApplyCursorUsageUi(CursorUsageInfo usage)
+    {
+        var track = Math.Max(0, StatsCursorTrack.ActualWidth);
+        if (track < 1)
+            track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
+
+        if (usage.State == CursorUsageState.Ok && usage.PercentUsed >= 0)
+        {
+            var used = Math.Clamp(usage.PercentUsed, 0, 100);
+            StatsCursor.Text = $"{used:0}%";
+            StatsCursorHint.Text = string.IsNullOrWhiteSpace(usage.ResetHint)
+                ? "已用"
+                : usage.ResetHint!;
+            StatsCursorBar.Background = used >= 90 ? WifiBarRed
+                : used >= 70 ? WifiBarOrange
+                : CursorBarBlue;
+            StatsCursorBar.Width = track * (used / 100.0);
+            return;
+        }
+
+        StatsCursorBar.Width = 0;
+        StatsCursorBar.Background = CursorBarBlue;
+        if (usage.State == CursorUsageState.Unavailable)
+        {
+            StatsCursor.Text = "未登录";
+            StatsCursorHint.Text = "WSL agent login";
+        }
+        else
+        {
+            StatsCursor.Text = "…";
+            StatsCursorHint.Text = "读取中";
+        }
     }
 
     private void ApplyWifiUi(WifiInfo wifi)

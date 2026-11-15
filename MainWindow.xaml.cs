@@ -210,13 +210,29 @@ public partial class MainWindow : Window
                 await TrySyncSilentAsync();
         };
 
-        // 邮件未读：约每 2 分钟静默查一次；进邮件页 / 手动刷新也会更新
-        _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(5) };
-        _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
+        // 邮件未读静默轮询；电池下拉长间隔
+        _mailPollTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMinutes(DesktopBox.Services.PowerBudget.OnBattery ? 12 : 5)
+        };
+        _mailPollTimer.Tick += async (_, _) =>
+        {
+            _mailPollTimer.Interval = TimeSpan.FromMinutes(
+                DesktopBox.Services.PowerBudget.OnBattery ? 12 : 5);
+            await PollMailUnreadAsync(silent: true);
+        };
 
-        // 网安热点：约每 15 分钟静默拉取；进页/手动刷新也会拉
-        _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
-        _cyberPollTimer.Tick += async (_, _) => await PollCyberNewsAsync(silent: true);
+        // 网安热点静默拉取；电池下拉长间隔
+        _cyberPollTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMinutes(DesktopBox.Services.PowerBudget.OnBattery ? 30 : 15)
+        };
+        _cyberPollTimer.Tick += async (_, _) =>
+        {
+            _cyberPollTimer.Interval = TimeSpan.FromMinutes(
+                DesktopBox.Services.PowerBudget.OnBattery ? 30 : 15);
+            await PollCyberNewsAsync(silent: true);
+        };
 
         _fileSearchTimer.Tick += async (_, _) =>
         {
@@ -1344,14 +1360,22 @@ public partial class MainWindow : Window
         SyncEdgeTimerInterval();
     }
 
-    /// <summary>收起默认 450ms；靠近左缘 120ms；钉住 200ms；展开未钉 80ms。</summary>
+    /// <summary>收起/贴边/展开探测间隔；电池下整体放慢，少叫醒 CPU。</summary>
     private void SyncEdgeTimerInterval()
     {
         int ms;
         if (!_expanded)
-            ms = ScreenNearLeftEdge(WinForms.Control.MousePosition) != null ? 120 : 450;
+        {
+            ms = ScreenNearLeftEdge(WinForms.Control.MousePosition) != null
+                ? DesktopBox.Services.PowerBudget.EdgeNearMs
+                : DesktopBox.Services.PowerBudget.EdgeIdleMs;
+        }
         else
-            ms = _pinned ? 200 : 80;
+        {
+            ms = _pinned
+                ? DesktopBox.Services.PowerBudget.EdgePinnedMs
+                : DesktopBox.Services.PowerBudget.EdgeExpandedMs;
+        }
         var want = TimeSpan.FromMilliseconds(ms);
         if (_edgeTimer.Interval != want)
             _edgeTimer.Interval = want;
