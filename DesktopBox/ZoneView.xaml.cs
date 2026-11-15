@@ -94,7 +94,8 @@ public partial class ZoneView : System.Windows.Controls.UserControl
     {
         StopStatsMonitor();
         StatsPanel.Visibility = Visibility.Visible;
-        StatsRow.Height = new GridLength(64);
+        // 随内容增高，避免第二行文字被裁切
+        StatsRow.Height = GridLength.Auto;
         _stats = new SystemStatsService();
         _stats.Sampled += OnStatsSampled;
         _stats.Start();
@@ -113,10 +114,10 @@ public partial class ZoneView : System.Windows.Controls.UserControl
         StatsRow.Height = new GridLength(0);
         StatsCpu.Text = "—";
         StatsCpuBar.Width = 0;
-        StatsMem.Text = "—";
-        StatsMemDetail.Text = "";
         StatsNetDown.Text = "↓ —";
         StatsNetUp.Text = "↑ —";
+        StatsUptime.Text = "—";
+        StatsClock.Text = "";
         StatsWifi.Text = "—";
         StatsWifiSsid.Text = "";
         StatsWifiBar.Width = 0;
@@ -136,25 +137,16 @@ public partial class ZoneView : System.Windows.Controls.UserControl
         else
         {
             StatsCpu.Text = $"{sample.CpuPercent:0}%";
-            var track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
+            var track = Math.Max(0, StatsCpuTrack.ActualWidth);
+            if (track < 1)
+                track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
             StatsCpuBar.Width = track * Math.Clamp(sample.CpuPercent / 100.0, 0, 1);
-        }
-
-        if (sample.Memory.IsValid)
-        {
-            StatsMem.Text = $"{sample.Memory.LoadPercent}%";
-            StatsMemDetail.Text =
-                $"{SystemStatsService.FormatBytes(sample.Memory.UsedBytes)} / {SystemStatsService.FormatBytes(sample.Memory.TotalBytes)}";
-        }
-        else
-        {
-            StatsMem.Text = "—";
-            StatsMemDetail.Text = "";
         }
 
         StatsNetDown.Text = "↓ " + SystemStatsService.FormatRate(sample.DownBytesPerSec);
         StatsNetUp.Text = "↑ " + SystemStatsService.FormatRate(sample.UpBytesPerSec);
-
+        StatsUptime.Text = SystemStatsService.FormatUptime(sample.Uptime);
+        StatsClock.Text = DateTime.Now.ToString("MM-dd HH:mm:ss");
         ApplyWifiUi(sample.Wifi);
     }
 

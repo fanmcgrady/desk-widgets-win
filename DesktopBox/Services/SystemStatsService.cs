@@ -6,7 +6,7 @@ using System.Windows.Threading;
 
 namespace DesktopBox.Services;
 
-/// <summary>按秒采样 CPU / 内存 / 网速 / Wi‑Fi，供内存区底部状态条。</summary>
+/// <summary>按秒采样 CPU / 流量 / Wi‑Fi / 开机。</summary>
 internal sealed class SystemStatsService : IDisposable
 {
     private readonly DispatcherTimer _timer;
@@ -68,10 +68,10 @@ internal sealed class SystemStatsService : IDisposable
         try
         {
             var cpu = ReadCpu();
-            var mem = ReadMemory();
             var wifi = ReadWifiSafe();
             ReadNetRates(out var down, out var up);
-            Sampled?.Invoke(this, new SystemStatsSample(cpu, mem, down, up, wifi));
+            var uptime = TimeSpan.FromMilliseconds(GetTickCount64());
+            Sampled?.Invoke(this, new SystemStatsSample(cpu, down, up, wifi, uptime));
         }
         catch
         {
@@ -101,24 +101,6 @@ internal sealed class SystemStatsService : IDisposable
         catch
         {
             return -1;
-        }
-    }
-
-    private static MemoryInfo ReadMemory()
-    {
-        try
-        {
-            var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
-            if (!GlobalMemoryStatusEx(ref status))
-                return MemoryInfo.Unknown;
-            return new MemoryInfo(
-                (long)status.TotalPhys,
-                (long)(status.TotalPhys - status.AvailPhys),
-                status.MemoryLoad);
-        }
-        catch
-        {
-            return MemoryInfo.Unknown;
         }
     }
 
@@ -303,32 +285,6 @@ internal sealed class SystemStatsService : IDisposable
         return $"{bytesPerSec / (1024 * 1024 * 1024):0.00} GB/s";
     }
 
-    public static string FormatBytes(long bytes)
-    {
-        double v = bytes;
-        if (v < 1024)
-            return $"{v:0} B";
-        if (v < 1024 * 1024)
-            return $"{v / 1024:0.0} KB";
-        if (v < 1024L * 1024 * 1024)
-            return $"{v / (1024 * 1024):0.0} MB";
-        return $"{v / (1024L * 1024 * 1024):0.00} GB";
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MemoryStatusEx
-    {
-        public uint Length;
-        public uint MemoryLoad;
-        public ulong TotalPhys;
-        public ulong AvailPhys;
-        public ulong TotalPageFile;
-        public ulong AvailPageFile;
-        public ulong TotalVirtual;
-        public ulong AvailVirtual;
-        public ulong AvailExtendedVirtual;
-    }
-
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WlanInterfaceInfo
     {
@@ -337,9 +293,6 @@ internal sealed class SystemStatsService : IDisposable
         public string Description;
         public int State;
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx lpBuffer);
 
     [DllImport("wlanapi.dll")]
     private static extern uint WlanOpenHandle(uint dwClientVersion, IntPtr pReserved, out uint pdwNegotiatedVersion, out IntPtr phClientHandle);
@@ -362,12 +315,18 @@ internal sealed class SystemStatsService : IDisposable
 
     [DllImport("wlanapi.dll")]
     private static extern void WlanFreeMemory(IntPtr pMemory);
-}
 
-internal readonly record struct MemoryInfo(long TotalBytes, long UsedBytes, uint LoadPercent)
-{
-    public static MemoryInfo Unknown => new(0, 0, 0);
-    public bool IsValid => TotalBytes > 0;
+    [DllImport("kernel32.dll")]
+    private static extern ulong GetTickCount64();
+
+    public static string FormatUptime(TimeSpan t)
+    {
+        if (t.TotalDays >= 1)
+            return $"{(int)t.TotalDays} 天 {t.Hours} 时";
+        if (t.TotalHours >= 1)
+            return $"{(int)t.TotalHours} 时 {t.Minutes} 分";
+        return $"{t.Minutes} 分 {t.Seconds} 秒";
+    }
 }
 
 internal readonly record struct WifiInfo(bool Connected, int SignalPercent, string Ssid)
@@ -379,7 +338,7 @@ internal readonly record struct WifiInfo(bool Connected, int SignalPercent, stri
 
 internal readonly record struct SystemStatsSample(
     double CpuPercent,
-    MemoryInfo Memory,
     double DownBytesPerSec,
     double UpBytesPerSec,
-    WifiInfo Wifi);
+    WifiInfo Wifi,
+    TimeSpan Uptime);
