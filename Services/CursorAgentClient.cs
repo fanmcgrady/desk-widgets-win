@@ -538,20 +538,14 @@ public sealed class CursorAgentClient
                     {
                         var piece = textEl.GetString() ?? "";
                         if (piece.Length == 0) continue;
+                        // 有 timestamp_ms 视为流式分片（不论是否带 model_call_id）；
+                        // 无 timestamp 且尚未收到正文时，收一条完整回复。
                         var hasTs = root.TryGetProperty("timestamp_ms", out _);
-                        var hasModelCall = root.TryGetProperty("model_call_id", out _);
-                        if (hasTs && !hasModelCall)
-                        {
-                            if (assistant.Length == 0) onLog?.Invoke("[assistant]");
-                            assistant.Append(piece);
-                            onDelta?.Invoke(piece);
-                        }
-                        else if (!hasTs && assistant.Length == 0)
-                        {
-                            onLog?.Invoke("[assistant]");
-                            assistant.Append(piece);
-                            onDelta?.Invoke(piece);
-                        }
+                        var take = hasTs || assistant.Length == 0;
+                        if (!take) continue;
+                        if (assistant.Length == 0) onLog?.Invoke("[assistant]");
+                        assistant.Append(piece);
+                        onDelta?.Invoke(piece);
                     }
                 }
                 return;

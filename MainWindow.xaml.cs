@@ -4520,19 +4520,20 @@ public partial class MainWindow : Window
         SealAgentStreamBubble();
         var label = AgentToolLabel(info.Kind);
         var state = !info.Completed ? "running" : (info.Failed ? "fail" : "done");
+        var detail = info.Detail ?? "";
         PostAgentUi(new
         {
             op = "tool",
             callId = info.CallId,
             kind = info.Kind,
             label,
-            detail = info.Detail ?? "",
+            detail,
             state,
             summary = info.ResultSummary ?? "",
         });
         AgentStatus.Text = info.Completed
             ? (info.Failed ? label + " 失败" : label + " 完成")
-            : label + (string.IsNullOrEmpty(info.Detail) ? "…" : " " + TruncateUi(info.Detail, 28));
+            : label + (string.IsNullOrEmpty(detail) ? "…" : " " + TruncateUi(detail, 28));
     }
 
     private static string AgentToolLabel(string kind) => kind.ToLowerInvariant() switch
