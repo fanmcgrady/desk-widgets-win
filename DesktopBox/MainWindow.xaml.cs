@@ -12,8 +12,10 @@ public partial class MainWindow : Window
     private bool _paused;
     private bool _fencesShown = true;
     private bool _syncQueued;
+    private bool _closing;
     private ForegroundWatcher? _foregroundWatcher;
     private ShellMouseRouting? _mouseRouting;
+    private DesktopDoubleClickShow? _desktopShow;
     private readonly Dictionary<string, ZoneView> _zones = new();
     private readonly Dictionary<string, Rect> _zoneRects = new();
     private readonly DispatcherTimer _repositionTimer;
@@ -89,6 +91,14 @@ public partial class MainWindow : Window
             _syncQueued = false;
             SyncZOrder();
         };
+
+        // 关闭后必须停表，否则会继续 EnsureHandle 并刷崩溃日志
+        Closing += (_, _) =>
+        {
+            _closing = true;
+            DisposeHooks();
+        };
+        Closed += (_, _) => DisposeHooks();
     }
 
     public void DisposeHooks()
@@ -96,6 +106,8 @@ public partial class MainWindow : Window
         _repositionTimer.Stop();
         _zOrderTimer.Stop();
         _syncDebounce.Stop();
+        _desktopShow?.Dispose();
+        _desktopShow = null;
         _mouseRouting?.Dispose();
         _mouseRouting = null;
         _foregroundWatcher?.Dispose();
@@ -103,6 +115,13 @@ public partial class MainWindow : Window
         foreach (var z in _zones.Values)
             z.DisposeService();
     }
+
+    private bool HasHwnd =>
+        !_closing
+        && new System.Windows.Interop.WindowInteropHelper(this).Handle != IntPtr.Zero;
+
+    /// <summary>有 HWND、未暂停、未关闭时才可改样式/Z 序。</summary>
+    private bool CanTouchWindow => HasHwnd && !_paused;
 
     private ZoneView? ZoneFromLocalPoint(System.Windows.Point local)
     {
@@ -118,14 +137,19 @@ public partial class MainWindow : Window
     public void SetPaused(bool paused)
     {
         _paused = paused;
+        if (!HasHwnd && !paused)
+            return;
+
         if (paused)
         {
             _fencesShown = false;
-            Visibility = Visibility.Hidden;
-            EnsureFenceStyle();
+            if (HasHwnd)
+                Visibility = Visibility.Hidden;
+            EnsureDesktopShowHook(true);
         }
         else
         {
+            EnsureDesktopShowHook(false);
             _fencesShown = true;
             Visibility = Visibility.Visible;
             FitPrimaryScreen(force: true);
@@ -134,6 +158,19 @@ public partial class MainWindow : Window
             SyncZOrder(force: true);
             foreach (var z in _zones.Values)
                 z.Reload();
+        }
+    }
+
+    private void EnsureDesktopShowHook(bool enable)
+    {
+        if (enable)
+        {
+            _desktopShow ??= new DesktopDoubleClickShow(() => DesktopBoxRuntime.SetPaused(false));
+            _desktopShow.Start();
+        }
+        else
+        {
+            _desktopShow?.Stop();
         }
     }
 
@@ -158,7 +195,7 @@ public partial class MainWindow : Window
 
     private void QueueSyncZOrder()
     {
-        if (_paused)
+        if (_paused || !CanTouchWindow)
             return;
         if (_syncQueued)
             return;
@@ -170,26 +207,40 @@ public partial class MainWindow : Window
     /// <summary>常显围栏，仅维持桌面层 Z 序；暂停时 Hidden。已在正确层则不动。</summary>
     private void SyncZOrder(bool force = false)
     {
-        if (_paused)
+        if (_paused || _closing || !CanTouchWindow)
             return;
 
-        if (Visibility != Visibility.Visible)
-            Visibility = Visibility.Visible;
+        try
+        {
+            if (Visibility != Visibility.Visible)
+                Visibility = Visibility.Visible;
 
-        _fencesShown = true;
-        EnsureFenceStyle();
-        _ = force;
-        ClickThrough.PlaceAboveDesktopIcons(this);
+            _fencesShown = true;
+            EnsureFenceStyle();
+            _ = force;
+            ClickThrough.PlaceAboveDesktopIcons(this);
+        }
+        catch (InvalidOperationException)
+        {
+            // 窗口已关闭时忽略
+            _closing = true;
+            DisposeHooks();
+        }
     }
 
     private void EnsureFenceStyle()
     {
+        if (!CanTouchWindow)
+            return;
         // ApplyFenceStyle 内部已做幂等；样式未变时不 SetWindowPos
         ClickThrough.ApplyFenceStyle(this);
     }
 
     private void FitPrimaryScreen(bool force = false)
     {
+        if (!CanTouchWindow)
+            return;
+
         var screen = WinForms.Screen.PrimaryScreen;
         if (screen is null)
             return;
@@ -273,7 +324,7 @@ public partial class MainWindow : Window
 
             var view = new ZoneView();
             view.Bind(cfg, _config.DropMode);
-            view.HideRequested += (_, _) => SetPaused(true);
+            view.HideRequested += (_, _) => DesktopBoxRuntime.SetPaused(true);
             RootGrid.Children.Add(view);
             _zones[id] = view;
         }

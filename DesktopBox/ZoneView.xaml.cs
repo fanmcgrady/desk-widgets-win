@@ -279,6 +279,7 @@ public partial class ZoneView : System.Windows.Controls.UserControl
             return;
         }
 
+        // 根目录双击标题 → 隐藏围栏（桌面双击再显示）
         HideRequested?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }

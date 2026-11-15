@@ -11,8 +11,22 @@ internal static class ClickThrough
     public static IntPtr EnsureHandle(Window window)
     {
         var helper = new WindowInteropHelper(window);
-        if (helper.Handle == IntPtr.Zero)
+        if (helper.Handle != IntPtr.Zero)
+            return helper.Handle;
+
+        // 窗口已关闭后再 EnsureHandle 会抛 InvalidOperationException
+        if (!window.IsLoaded)
+            return IntPtr.Zero;
+
+        try
+        {
             helper.EnsureHandle();
+        }
+        catch (InvalidOperationException)
+        {
+            return IntPtr.Zero;
+        }
+
         return helper.Handle;
     }
 

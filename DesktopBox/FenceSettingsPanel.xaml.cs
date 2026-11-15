@@ -16,7 +16,32 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
     public FenceSettingsPanel()
     {
         InitializeComponent();
-        Loaded += (_, _) => ReloadFromDisk();
+        Loaded += (_, _) =>
+        {
+            ReloadFromDisk();
+            DesktopBoxRuntime.PauseChanged += OnPauseChanged;
+        };
+        Unloaded += (_, _) => DesktopBoxRuntime.PauseChanged -= OnPauseChanged;
+    }
+
+    private void OnPauseChanged()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(OnPauseChanged);
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            ChkShowFences.IsChecked = !DesktopBoxRuntime.IsPaused;
+            StatusText.Text = DesktopBoxRuntime.IsPaused ? "围栏已隐藏" : "围栏已显示";
+        }
+        finally
+        {
+            _loading = false;
+        }
     }
 
     public void ReloadFromDisk()
@@ -223,6 +248,8 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
     private void ChkShowFences_Changed(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
+        if (ChkShowFences.IsChecked == true && !DesktopBoxRuntime.IsRunning)
+            DesktopBoxRuntime.TryStart();
         DesktopBoxRuntime.SetPaused(ChkShowFences.IsChecked != true);
         StatusText.Text = ChkShowFences.IsChecked == true ? "围栏已显示" : "围栏已隐藏";
     }
