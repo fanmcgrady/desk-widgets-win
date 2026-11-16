@@ -35,9 +35,10 @@ internal sealed class SystemStatsService : IDisposable
         _prevUtc = DateTime.UtcNow;
         _tick = 0;
         _timer.Interval = PowerBudget.StatsInterval;
-        // 启动立刻拉一次用量（后台）
+        // 启动立刻拉一次用量（后台），并马上刷一帧，避免底栏先空白
         _ = CursorUsageService.PeekAndRefresh();
         _timer.Start();
+        Tick();
     }
 
     public void Stop()

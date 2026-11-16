@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private ForegroundWatcher? _foregroundWatcher;
     private ShellMouseRouting? _mouseRouting;
     private DesktopDoubleClickShow? _desktopShow;
+    private StatsAppBarWindow? _statsBar;
     private readonly Dictionary<string, ZoneView> _zones = new();
     private readonly Dictionary<string, Rect> _zoneRects = new();
     private readonly DispatcherTimer _repositionTimer;
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
         {
             EnsureFenceStyle();
             Visibility = Visibility.Visible;
+            EnsureStatsBar();
             FitPrimaryScreen();
             RefreshRegion();
             UpdateLayout();
@@ -75,7 +77,10 @@ public partial class MainWindow : Window
         _repositionTimer.Tick += (_, _) =>
         {
             if (_fencesShown && !_paused)
+            {
+                _statsBar?.RefreshPosition();
                 FitPrimaryScreen();
+            }
         };
         _repositionTimer.Start();
 
@@ -112,8 +117,39 @@ public partial class MainWindow : Window
         _mouseRouting = null;
         _foregroundWatcher?.Dispose();
         _foregroundWatcher = null;
+        DisposeStatsBar();
         foreach (var z in _zones.Values)
             z.DisposeService();
+    }
+
+    private void EnsureStatsBar()
+    {
+        if (_closing)
+            return;
+        if (_statsBar is null)
+        {
+            _statsBar = new StatsAppBarWindow();
+            _statsBar.Closed += (_, _) =>
+            {
+                if (!_closing)
+                    _statsBar = null;
+            };
+        }
+
+        _statsBar.Start();
+    }
+
+    private void DisposeStatsBar()
+    {
+        if (_statsBar is null)
+            return;
+        try
+        {
+            _statsBar.Pause();
+            _statsBar.Close();
+        }
+        catch { /* ignore */ }
+        _statsBar = null;
     }
 
     private bool HasHwnd =>
@@ -145,6 +181,7 @@ public partial class MainWindow : Window
             _fencesShown = false;
             if (HasHwnd)
                 Visibility = Visibility.Hidden;
+            _statsBar?.Pause();
             EnsureDesktopShowHook(true);
         }
         else
@@ -152,6 +189,8 @@ public partial class MainWindow : Window
             EnsureDesktopShowHook(false);
             _fencesShown = true;
             Visibility = Visibility.Visible;
+            EnsureStatsBar();
+            _statsBar?.Resume();
             FitPrimaryScreen(force: true);
             RefreshRegion(force: true);
             UpdateLayout();
@@ -340,7 +379,7 @@ public partial class MainWindow : Window
         var layout = _config.Layout;
         var w = ActualWidth;
         var h = ActualHeight;
-        // 左/右/顶贴满屏幕外沿；底部避开任务栏；中间十字白槽留给桌面/Logo
+        // 左/右/顶贴边；底避开任务栏与底边状态 AppBar（WorkingArea 已含二者）
         var gx = w * layout.GutterX;
         var gy = h * layout.GutterY;
         var cx = w / 2;

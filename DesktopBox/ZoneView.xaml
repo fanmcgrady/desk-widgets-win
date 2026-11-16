@@ -16,7 +16,6 @@
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="*" />
-        <RowDefinition x:Name="StatsRow" Height="0" />
       </Grid.RowDefinitions>
 
       <Border x:Name="TitleBar"
@@ -38,63 +37,6 @@
       <Grid x:Name="ShellHostContainer"
             Grid.Row="1"
             Margin="0" />
-
-      <!-- 内存区底部：Cursor 用量 / 流量 / 开机 / Wi‑Fi -->
-      <Border x:Name="StatsPanel"
-              Grid.Row="2"
-              Visibility="Collapsed"
-              Background="#FFF7F7F7"
-              BorderBrush="#14000000"
-              BorderThickness="0,1,0,0"
-              Padding="10,10"
-              IsHitTestVisible="False"
-              ClipToBounds="False">
-        <UniformGrid Columns="4" Rows="1">
-          <StackPanel Margin="0,0,10,0">
-            <TextBlock Text="Cursor" FontSize="10" Foreground="#FF999999"/>
-            <TextBlock x:Name="StatsCursor" Text="—" FontSize="15" FontWeight="SemiBold"
-                       Foreground="#FF333333" Margin="0,2,0,0"/>
-            <TextBlock x:Name="StatsCursorHint" Text="" FontSize="10"
-                       Foreground="#FFAAAAAA" Margin="0,1,0,0"
-                       TextTrimming="CharacterEllipsis"/>
-            <Border x:Name="StatsCursorTrack" Height="3" Background="#14000000"
-                    CornerRadius="1" Margin="0,6,0,0">
-              <Border x:Name="StatsCursorBar" Height="3" HorizontalAlignment="Left"
-                      Background="#FF0078D4" CornerRadius="1" Width="0"/>
-            </Border>
-          </StackPanel>
-          <StackPanel Margin="0,0,10,0">
-            <TextBlock Text="流量" FontSize="10" Foreground="#FF999999"/>
-            <TextBlock x:Name="StatsNetDown" Text="↓ —" FontSize="12"
-                       Foreground="#FF333333" Margin="0,2,0,0"/>
-            <TextBlock x:Name="StatsNetUp" Text="↑ —" FontSize="12"
-                       Foreground="#FF333333" Margin="0,1,0,0"/>
-          </StackPanel>
-          <StackPanel Margin="0,0,10,0">
-            <TextBlock Text="开机" FontSize="10" Foreground="#FF999999"/>
-            <TextBlock x:Name="StatsUptime" Text="—" FontSize="14" FontWeight="SemiBold"
-                       Foreground="#FF333333" Margin="0,2,0,0"/>
-            <TextBlock x:Name="StatsClock" Text="" FontSize="10"
-                       Foreground="#FFAAAAAA" Margin="0,2,0,0"/>
-          </StackPanel>
-          <StackPanel>
-            <DockPanel LastChildFill="True">
-              <TextBlock Text="Wi‑Fi" FontSize="10" Foreground="#FF999999"
-                         VerticalAlignment="Center"/>
-              <TextBlock x:Name="StatsWifiSsid" FontSize="10" Foreground="#FF888888"
-                         Margin="6,0,0,0" VerticalAlignment="Center"
-                         TextTrimming="CharacterEllipsis"/>
-            </DockPanel>
-            <TextBlock x:Name="StatsWifi" Text="—" FontSize="15" FontWeight="SemiBold"
-                       Foreground="#FF333333" Margin="0,2,0,0"/>
-            <Border x:Name="StatsWifiTrack" Height="4" Background="#14000000"
-                    CornerRadius="2" Margin="0,6,0,0">
-              <Border x:Name="StatsWifiBar" Height="4" HorizontalAlignment="Left"
-                      Background="#FF107C10" CornerRadius="2" Width="0"/>
-            </Border>
-          </StackPanel>
-        </UniformGrid>
-      </Border>
     </Grid>
   </Border>
 </UserControl>

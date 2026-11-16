@@ -15,7 +15,6 @@ public partial class ZoneView : System.Windows.Controls.UserControl
 
     private ZoneConfig? _zone;
     private ExplorerBrowserHost? _shellHost;
-    private SystemStatsService? _stats;
 
     public event EventHandler? HideRequested;
 
@@ -28,7 +27,6 @@ public partial class ZoneView : System.Windows.Controls.UserControl
     {
         InitializeComponent();
         IsVisibleChanged += OnIsVisibleChanged;
-        Unloaded += (_, _) => StopStatsMonitor();
     }
 
     internal bool TryGetShellHost(out ExplorerBrowserHost? host)
@@ -69,18 +67,12 @@ public partial class ZoneView : System.Windows.Controls.UserControl
         _shellHost.Navigated += OnShellNavigated;
         ShellHostContainer.Children.Clear();
         ShellHostContainer.Children.Add(_shellHost);
-
-        if (string.Equals(zone.Id, "todo", StringComparison.OrdinalIgnoreCase))
-            StartStatsMonitor();
-        else
-            StopStatsMonitor();
     }
 
     public void Reload() => _shellHost?.RefreshView();
 
     public void DisposeService()
     {
-        StopStatsMonitor();
         if (_shellHost is not null)
         {
             _shellHost.Navigated -= OnShellNavigated;
@@ -88,145 +80,6 @@ public partial class ZoneView : System.Windows.Controls.UserControl
             _shellHost.Dispose();
             _shellHost = null;
         }
-    }
-
-    private void StartStatsMonitor()
-    {
-        StopStatsMonitor();
-        StatsPanel.Visibility = Visibility.Visible;
-        // 随内容增高，避免第二行文字被裁切
-        StatsRow.Height = GridLength.Auto;
-        _stats = new SystemStatsService();
-        _stats.Sampled += OnStatsSampled;
-        _stats.Start();
-    }
-
-    private void StopStatsMonitor()
-    {
-        if (_stats is not null)
-        {
-            _stats.Sampled -= OnStatsSampled;
-            _stats.Dispose();
-            _stats = null;
-        }
-
-        StatsPanel.Visibility = Visibility.Collapsed;
-        StatsRow.Height = new GridLength(0);
-        StatsCursor.Text = "—";
-        StatsCursorHint.Text = "";
-        StatsCursorBar.Width = 0;
-        StatsCursorBar.Background = CreateFrozenBrush(0x00, 0x78, 0xD4);
-        StatsNetDown.Text = "↓ —";
-        StatsNetUp.Text = "↑ —";
-        StatsUptime.Text = "—";
-        StatsClock.Text = "";
-        StatsWifi.Text = "—";
-        StatsWifiSsid.Text = "";
-        StatsWifiBar.Width = 0;
-        StatsWifiBar.Background = WifiBarGray;
-    }
-
-    private static readonly SolidColorBrush WifiBarGreen = CreateFrozenBrush(0x10, 0x7C, 0x10);
-    private static readonly SolidColorBrush WifiBarOrange = CreateFrozenBrush(0xF7, 0x63, 0x0C);
-    private static readonly SolidColorBrush WifiBarRed = CreateFrozenBrush(0xE8, 0x11, 0x23);
-    private static readonly SolidColorBrush WifiBarGray = CreateFrozenBrush(0xA0, 0xA0, 0xA0);
-    private static readonly SolidColorBrush WifiTextMuted = CreateFrozenBrush(0x99, 0x99, 0x99);
-    private static readonly SolidColorBrush CursorBarBlue = CreateFrozenBrush(0x00, 0x78, 0xD4);
-
-    private void OnStatsSampled(object? sender, SystemStatsSample sample)
-    {
-        ApplyCursorUsageUi(sample.Cursor);
-        StatsNetDown.Text = "↓ " + SystemStatsService.FormatRate(sample.DownBytesPerSec);
-        StatsNetUp.Text = "↑ " + SystemStatsService.FormatRate(sample.UpBytesPerSec);
-        StatsUptime.Text = SystemStatsService.FormatUptime(sample.Uptime);
-        StatsClock.Text = DateTime.Now.ToString("MM-dd HH:mm:ss");
-        ApplyWifiUi(sample.Wifi);
-    }
-
-    private void ApplyCursorUsageUi(CursorUsageInfo usage)
-    {
-        var track = Math.Max(0, StatsCursorTrack.ActualWidth);
-        if (track < 1)
-            track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
-
-        if (usage.State == CursorUsageState.Ok && usage.PercentUsed >= 0)
-        {
-            var used = Math.Clamp(usage.PercentUsed, 0, 100);
-            StatsCursor.Text = $"{used:0}%";
-            StatsCursorHint.Text = string.IsNullOrWhiteSpace(usage.ResetHint)
-                ? "已用"
-                : usage.ResetHint!;
-            StatsCursorBar.Background = used >= 90 ? WifiBarRed
-                : used >= 70 ? WifiBarOrange
-                : CursorBarBlue;
-            StatsCursorBar.Width = track * (used / 100.0);
-            return;
-        }
-
-        StatsCursorBar.Width = 0;
-        StatsCursorBar.Background = CursorBarBlue;
-        if (usage.State == CursorUsageState.Unavailable)
-        {
-            StatsCursor.Text = "未登录";
-            StatsCursorHint.Text = "WSL agent login";
-        }
-        else
-        {
-            StatsCursor.Text = "…";
-            StatsCursorHint.Text = "读取中";
-        }
-    }
-
-    private void ApplyWifiUi(WifiInfo wifi)
-    {
-        var track = Math.Max(0, StatsWifiTrack.ActualWidth);
-        if (track < 1)
-            track = Math.Max(0, (StatsPanel.ActualWidth / 4) - 24);
-
-        if (!wifi.HasAdapterOrLink)
-        {
-            StatsWifi.Text = "无网卡";
-            StatsWifi.Foreground = WifiTextMuted;
-            StatsWifiSsid.Text = "";
-            StatsWifiBar.Width = 0;
-            StatsWifiBar.Background = WifiBarGray;
-            return;
-        }
-
-        if (!wifi.Connected)
-        {
-            StatsWifi.Text = "未连接";
-            StatsWifi.Foreground = WifiTextMuted;
-            StatsWifiSsid.Text = "";
-            StatsWifiBar.Width = 0;
-            StatsWifiBar.Background = WifiBarGray;
-            return;
-        }
-
-        var q = wifi.SignalPercent >= 0 ? wifi.SignalPercent : 50;
-        string level;
-        SolidColorBrush color;
-        if (q >= 70)
-        {
-            level = "强";
-            color = WifiBarGreen;
-        }
-        else if (q >= 40)
-        {
-            level = "中";
-            color = WifiBarOrange;
-        }
-        else
-        {
-            level = "弱";
-            color = WifiBarRed;
-        }
-
-        StatsWifi.Text = level;
-        StatsWifi.Foreground = color;
-        StatsWifiSsid.Text = string.IsNullOrWhiteSpace(wifi.Ssid) ? "" : wifi.Ssid;
-        StatsWifiBar.Background = color;
-        StatsWifiBar.Width = track * Math.Clamp(q / 100.0, 0.08, 1);
     }
 
     private void OnShellNavigated(object? sender, string path)
@@ -249,14 +102,7 @@ public partial class ZoneView : System.Windows.Controls.UserControl
     private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (IsVisible)
-        {
             _shellHost?.RefreshView();
-            _stats?.Start();
-        }
-        else
-        {
-            _stats?.Stop();
-        }
     }
 
     private void ApplyTitle(string name, string english, string? relative)
