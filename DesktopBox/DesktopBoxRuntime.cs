@@ -185,7 +185,7 @@ public static class DesktopBoxRuntime
         _autoSort?.SetRuntimeEnabled(enabled);
     }
 
-    public static bool IsAutoSortEnabled => _autoSort?.IsEnabled ?? (LoadConfig().AutoSort?.Enabled ?? true);
+    public static bool IsAutoSortEnabled => _autoSort?.IsEnabled ?? (LoadConfig().AutoSort?.Enabled ?? false);
 
     public static void PreviewZones() => _main?.PreviewZones(TimeSpan.Zero);
 }

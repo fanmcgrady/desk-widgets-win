@@ -25,6 +25,7 @@
           <WrapPanel Margin="0,0,0,4">
             <CheckBox x:Name="ChkAutoSort" Content="新文件归入内存" FontSize="11"
                       Margin="0,0,12,4" VerticalAlignment="Center"
+                      ToolTip="默认关闭。勾选后监视桌面，新文件移入内存区（X:\\）"
                       Checked="ChkAutoSort_Changed" Unchecked="ChkAutoSort_Changed"/>
             <CheckBox x:Name="ChkShowFences" Content="显示围栏" FontSize="11"
                       Margin="0,0,12,4" VerticalAlignment="Center" IsChecked="True"

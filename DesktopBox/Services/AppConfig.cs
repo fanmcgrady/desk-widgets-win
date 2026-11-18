@@ -100,8 +100,8 @@ public sealed class AppConfig
 
 public sealed class AutoSortConfig
 {
-    /// <summary>是否启用：桌面新文件自动移入目标区。</summary>
-    public bool Enabled { get; set; } = true;
+    /// <summary>是否启用：桌面新文件自动移入目标区（默认关，按需开以省资源）。</summary>
+    public bool Enabled { get; set; } = false;
 
     /// <summary>目标分区 id，默认内存区（X:\）。</summary>
     public string TargetZoneId { get; set; } = "todo";

@@ -4,7 +4,8 @@ using System.IO;
 namespace DesktopBox.Services;
 
 /// <summary>
-/// 监视用户桌面：新文件/文件夹防抖后移动到内存区（X:\）。
+/// 按需监视用户桌面：开启后新文件/文件夹防抖移动到内存区（X:\）。
+/// 关闭时不挂 FileSystemWatcher。
 /// </summary>
 internal sealed class DesktopAutoSortService : IDisposable
 {
@@ -14,20 +15,33 @@ internal sealed class DesktopAutoSortService : IDisposable
     private readonly ConcurrentDictionary<string, byte> _pending = new(StringComparer.OrdinalIgnoreCase);
     private FileSystemWatcher? _watcher;
     private System.Threading.Timer? _debounceTimer;
-    private bool _runtimeEnabled = true;
+    private bool _runtimeEnabled;
     private bool _disposed;
 
     public DesktopAutoSortService(AppConfig config)
     {
         _config = config;
+        _runtimeEnabled = config.AutoSort?.Enabled ?? false;
         _desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         _fenceRoot = Path.GetFullPath(AppConfig.DefaultRoot);
     }
 
-    public bool IsEnabled => _runtimeEnabled && (_config.AutoSort?.Enabled ?? true);
+    public bool IsEnabled => !_disposed && _runtimeEnabled && (_config.AutoSort?.Enabled ?? false);
 
+    /// <summary>仅在启用时创建监视；已在监视则幂等。</summary>
     public void Start()
     {
+        if (_disposed)
+            return;
+
+        _runtimeEnabled = _config.AutoSort?.Enabled ?? false;
+        if (!IsEnabled)
+        {
+            StopWatcher();
+            Log("auto-sort idle (disabled, no watcher)");
+            return;
+        }
+
         if (_watcher is not null)
             return;
 
@@ -42,18 +56,46 @@ internal sealed class DesktopAutoSortService : IDisposable
         _watcher.Created += OnCreated;
         _watcher.Renamed += OnRenamed;
 
-        _debounceTimer = new System.Threading.Timer(_ => FlushPending(), null, Timeout.Infinite, Timeout.Infinite);
+        _debounceTimer ??= new System.Threading.Timer(_ => FlushPending(), null, Timeout.Infinite, Timeout.Infinite);
         Log("auto-sort started");
     }
 
     public void SetRuntimeEnabled(bool enabled)
     {
-        _runtimeEnabled = enabled;
+        if (_disposed)
+            return;
+
         if (_config.AutoSort is null)
             _config.AutoSort = new AutoSortConfig();
         _config.AutoSort.Enabled = enabled;
         _config.Save();
-        Log(enabled ? "auto-sort enabled" : "auto-sort paused");
+        _runtimeEnabled = enabled;
+
+        if (enabled)
+        {
+            Start();
+            Log("auto-sort enabled");
+        }
+        else
+        {
+            StopWatcher();
+            Log("auto-sort paused (watcher removed)");
+        }
+    }
+
+    private void StopWatcher()
+    {
+        _pending.Clear();
+        _debounceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+
+        if (_watcher is not null)
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Created -= OnCreated;
+            _watcher.Renamed -= OnRenamed;
+            _watcher.Dispose();
+            _watcher = null;
+        }
     }
 
     private void OnCreated(object sender, FileSystemEventArgs e) => Queue(e.FullPath);
@@ -164,7 +206,7 @@ internal sealed class DesktopAutoSortService : IDisposable
             name.StartsWith("~$", StringComparison.Ordinal))
             return true;
 
-        // 围栏根及其子项（E:\桌面分区）
+        // 围栏根及其子项
         if (PathsEqual(full, _fenceRoot) || IsUnder(full, _fenceRoot))
             return true;
 
@@ -255,13 +297,8 @@ internal sealed class DesktopAutoSortService : IDisposable
         if (_disposed)
             return;
         _disposed = true;
+        StopWatcher();
         _debounceTimer?.Dispose();
         _debounceTimer = null;
-        if (_watcher is not null)
-        {
-            _watcher.EnableRaisingEvents = false;
-            _watcher.Dispose();
-            _watcher = null;
-        }
     }
 }

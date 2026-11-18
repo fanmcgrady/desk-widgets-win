@@ -2,6 +2,7 @@
 using System.Windows.Threading;
 using DesktopBox.Services;
 using DesktopBox.Services.Shell;
+using Microsoft.Win32;
 using WinForms = System.Windows.Forms;
 
 namespace DesktopBox;
@@ -19,8 +20,6 @@ public partial class MainWindow : Window
     private StatsAppBarWindow? _statsBar;
     private readonly Dictionary<string, ZoneView> _zones = new();
     private readonly Dictionary<string, Rect> _zoneRects = new();
-    private readonly DispatcherTimer _repositionTimer;
-    private readonly DispatcherTimer _zOrderTimer;
     private readonly DispatcherTimer _syncDebounce;
     private double _lastLeft = double.NaN;
     private double _lastTop = double.NaN;
@@ -72,22 +71,8 @@ public partial class MainWindow : Window
             RefreshRegion();
         };
 
-        // 分辨率变化才需要重摆；无变化时直接跳过，避免定时 SetWindowRgn 闪烁
-        _repositionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
-        _repositionTimer.Tick += (_, _) =>
-        {
-            if (_fencesShown && !_paused)
-            {
-                _statsBar?.RefreshPosition();
-                FitPrimaryScreen();
-            }
-        };
-        _repositionTimer.Start();
-
-        // 兜底纠正 Z 序；正常靠前台事件。间隔拉长，已在正确层则不动。
-        _zOrderTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
-        _zOrderTimer.Tick += (_, _) => SyncZOrder();
-        _zOrderTimer.Start();
+        // Z 序靠前台事件；重摆靠分辨率变化，不再 10s/15s 轮询
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         _syncDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _syncDebounce.Tick += (_, _) =>
@@ -106,10 +91,23 @@ public partial class MainWindow : Window
         Closed += (_, _) => DisposeHooks();
     }
 
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        if (_closing || _paused || !_fencesShown)
+            return;
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+        {
+            if (_closing || _paused)
+                return;
+            _statsBar?.RefreshPosition();
+            FitPrimaryScreen(force: true);
+            SyncZOrder(force: true);
+        });
+    }
+
     public void DisposeHooks()
     {
-        _repositionTimer.Stop();
-        _zOrderTimer.Stop();
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _syncDebounce.Stop();
         _desktopShow?.Dispose();
         _desktopShow = null;

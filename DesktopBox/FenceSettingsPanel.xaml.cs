@@ -50,7 +50,7 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
         try
         {
             var cfg = AppConfig.LoadOrCreate();
-            ChkAutoSort.IsChecked = cfg.AutoSort?.Enabled ?? true;
+            ChkAutoSort.IsChecked = cfg.AutoSort?.Enabled ?? false;
             ChkShowFences.IsChecked = !DesktopBoxRuntime.IsPaused;
             RadioMove.IsChecked = !string.Equals(cfg.DropMode, "copy", StringComparison.OrdinalIgnoreCase);
             RadioCopy.IsChecked = string.Equals(cfg.DropMode, "copy", StringComparison.OrdinalIgnoreCase);
