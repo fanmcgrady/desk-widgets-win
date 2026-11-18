@@ -43,6 +43,10 @@ internal static class ZoneDragMoveForce
     private static bool _dragActive;
     private static bool _shiftForced;
 
+    /// <summary>
+    /// 登记 DefView：只加入命中表并子类化以收 LVN 拖放通知（区间默认移动）。
+    /// 滚轮/键盘/侧键走 ListView 子类化。
+    /// </summary>
     public static void RegisterView(IntPtr hwndView, ExplorerBrowserHost host)
     {
         if (hwndView == IntPtr.Zero)
@@ -52,13 +56,16 @@ internal static class ZoneDragMoveForce
         SetWindowSubclass(hwndView, SubclassCallback, SubclassId, IntPtr.Zero);
     }
 
-    /// <summary>额外登记并子类化 ListView，便于命中测试与点击获焦。</summary>
+    /// <summary>
+    /// 登记别名。仅 SysListView32 再子类化；Host 等只进命中表，少挂一层钩子。
+    /// </summary>
     public static void RegisterAlias(IntPtr hwnd, ExplorerBrowserHost host)
     {
         if (hwnd == IntPtr.Zero)
             return;
         Views[hwnd] = new WeakReference<ExplorerBrowserHost>(host);
-        SetWindowSubclass(hwnd, SubclassCallback, SubclassId, IntPtr.Zero);
+        if (IsClass(hwnd, "SysListView32"))
+            SetWindowSubclass(hwnd, SubclassCallback, SubclassId, IntPtr.Zero);
     }
 
     public static void UnregisterView(IntPtr hwndView)
@@ -66,18 +73,28 @@ internal static class ZoneDragMoveForce
         if (hwndView == IntPtr.Zero)
             return;
 
-        // 清掉指向同一 host 的别名
+        // 清掉指向同一 host 的别名，并拆子类化
         if (Views.TryGetValue(hwndView, out var weak) && weak.TryGetTarget(out var host))
         {
-            foreach (var key in Views.Keys)
+            foreach (var key in Views.Keys.ToArray())
             {
                 if (Views.TryGetValue(key, out var w) && w.TryGetTarget(out var h) && ReferenceEquals(h, host))
+                {
+                    RemoveWindowSubclass(key, SubclassCallback, SubclassId);
                     Views.TryRemove(key, out _);
+                }
             }
         }
 
-        Views.TryRemove(hwndView, out _);
         RemoveWindowSubclass(hwndView, SubclassCallback, SubclassId);
+        Views.TryRemove(hwndView, out _);
+    }
+
+    private static bool IsClass(IntPtr hwnd, string className)
+    {
+        var sb = new StringBuilder(64);
+        return GetClassName(hwnd, sb, sb.Capacity) > 0
+               && string.Equals(sb.ToString(), className, StringComparison.OrdinalIgnoreCase);
     }
 
     public static void Shutdown()

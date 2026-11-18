@@ -11,6 +11,7 @@ using System.Windows.Threading;
 using DeskWidgets.Services;
 using DesktopBox;
 using Markdig;
+using Microsoft.Web.WebView2.Core;
 using DrawingColor = System.Drawing.Color;
 using DrawingIcon = System.Drawing.Icon;
 using DrawingPoint = System.Drawing.Point;
@@ -27,15 +28,16 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>待办、邮件列表、大模型、文件、笔记窄态；仅网安满屏。</summary>
+    /// <summary>待办、邮件列表、大模型、文件、笔记窄态；网安/读书满屏。</summary>
     private const double PanelWidthDip = 320;
-    /// <summary>笔记加宽 / 邮件详情·写信；网安满屏时也作下限参考。</summary>
+    /// <summary>笔记加宽 / 邮件详情·写信；网安/读书满屏时也作下限参考。</summary>
     private const double PanelWidthMailDip = 560;
+    private const string WereadHomeUrl = "https://weread.qq.com/";
     private const int EdgeHitDip = 12;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
     private const int EdgeExpandDwellMs = 180;
 
-    private enum TabMode { Note, Todo, Mail, Agent, Cyber, File }
+    private enum TabMode { Note, Todo, Mail, Agent, Cyber, File, Read }
     private enum CyberListMode { Hot, Fav, Sources }
 
     private readonly Store _store = new();
@@ -48,6 +50,8 @@ public partial class MainWindow : Window
     private bool _cyberNewsLoading;
     private bool _cyberWebReady;
     private bool _cyberWebNavHooked;
+    private bool _wereadWebReady;
+    private bool _wereadNavigated;
     /// <summary>详情导航代数：连按切换时只认最新一次。</summary>
     private int _cyberWebNavEpoch;
     private string? _cyberWebTargetUrl;
@@ -82,6 +86,8 @@ public partial class MainWindow : Window
     private DispatcherTimer? _displayDebounce;
     private WinForms.NotifyIcon? _tray;
     private DrawingIcon? _trayIcon;
+    private WinForms.ToolStripMenuItem? _trayFencesItem;
+    private bool _trayFenceMenuUpdating;
     private HwndSource? _hwndSource;
     private bool _keyboardHookInstalled;
     private IntPtr _keyboardHook = IntPtr.Zero;
@@ -106,8 +112,8 @@ public partial class MainWindow : Window
     private int _fileFocusTicks;
     private bool _fileFocusBusy;
 
-    // 全局唤醒：连按两下 Ctrl；消失：Esc；文件：Alt+空格；大模型：Ctrl+空格；展开时 Ctrl+1..6 用 RegisterHotKey
-    private const int HotkeyIdTabBase = 0xD510; // +1..+6
+    // 全局唤醒：连按两下 Ctrl；消失：Esc；文件：Alt+空格；大模型：Ctrl+空格；展开时 Ctrl+1..7 用 RegisterHotKey
+    private const int HotkeyIdTabBase = 0xD510; // +1..+7
     private const uint ModControl = 0x0002;
     private const uint ModNoRepeat = 0x4000;
     private const uint WmHotkey = 0x0312;
@@ -210,6 +216,7 @@ public partial class MainWindow : Window
                 await TrySyncSilentAsync();
         };
 
+        // 邮件/网安改为进页再拉，不再后台静默轮询
         _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(5) };
         _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
 
@@ -258,16 +265,16 @@ public partial class MainWindow : Window
         Deactivated += (_, _) => UnregisterTabHotkeys();
         _edgeTimer.Start();
         _syncTimer.Start();
-        _mailPollTimer.Start();
-        _cyberPollTimer.Start();
+        // 不启动邮件/网安后台轮询；进对应页签时再拉
         UpdateCyberBadge();
 
         Dispatcher.BeginInvoke(() =>
         {
             try
             {
+                // 电池下默认不启围栏（省电）；托盘/设置可手动 allowOnBattery 拉起
                 if (!DesktopBoxRuntime.TryStart())
-                    System.Diagnostics.Debug.WriteLine("DesktopBoxRuntime: mutex busy");
+                    System.Diagnostics.Debug.WriteLine("DesktopBoxRuntime: skipped or mutex busy");
                 else
                     FenceSettings.ReloadFromDisk();
             }
@@ -284,20 +291,7 @@ public partial class MainWindow : Window
 
         StartupWatchWindow.ShowIfFreshBoot();
 
-        var deferred = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
-        deferred.Tick += async (_, _) =>
-        {
-            deferred.Stop();
-            // 邮件列表缓存过期才打 IMAP；网安到拉取间隔才拉，避免启动连打两轮
-            var mailDue = _mail.Config.IsConfigured
-                          && (_mailCacheAtUtc == DateTime.MinValue
-                              || DateTime.UtcNow - _mailCacheAtUtc >= MailCacheTtl);
-            if (mailDue)
-                _ = PollMailUnreadAsync(silent: true);
-            if (_cyberNews.IsFetchDue)
-                await PollCyberNewsAsync(silent: true);
-        };
-        deferred.Start();
+        // 启动后不再预拉邮件未读/网安，等用户进页再请求
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -532,15 +526,15 @@ public partial class MainWindow : Window
 
     private double ActivePanelWidthDip => _tab switch
     {
-        TabMode.Cyber => CyberReadingWidthDip(),
+        TabMode.Cyber or TabMode.Read => WideReadingWidthDip(),
         // 邮件详情 / 写信略宽；笔记可选手动加宽；文件页与默认同宽（分区配置在搜索下方）
         TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
         TabMode.Note when _noteWide => PanelWidthMailDip,
         _ => PanelWidthDip,
     };
 
-    /// <summary>网安页签：从左缘向右铺满当前屏工作区。</summary>
-    private double CyberReadingWidthDip()
+    /// <summary>网安 / 读书：从左缘向右铺满当前屏工作区。</summary>
+    private double WideReadingWidthDip()
     {
         var screen = ResolveScreen(_dockScreen)
                      ?? WinForms.Screen.PrimaryScreen
@@ -550,8 +544,8 @@ public partial class MainWindow : Window
 
     private double CapPanelWidthDip(WinForms.Screen screen, double dipW)
     {
-        // 网安页签允许满屏；其它页签仍限制约 55%，避免占满笔记本
-        if (_tab == TabMode.Cyber)
+        // 网安/读书允许满屏；其它页签仍限制约 55%，避免占满笔记本
+        if (_tab is TabMode.Cyber or TabMode.Read)
             return dipW;
         var maxDip = screen.WorkingArea.Width / DpiScale(screen) * 0.55;
         return dipW > maxDip ? Math.Max(PanelWidthDip, maxDip) : dipW;
@@ -590,7 +584,9 @@ public partial class MainWindow : Window
         // 宽高按这块屏的像素来，再换成 WPF 正在用的比例，避免 200% 和 125% 叠在一起把窗口撑大
         // MaxWidth 锁死窄栏：邮件 HTML / WebView2 内容最小宽常把窗口撑到 560+
         Width = dipW;
-        MaxWidth = expanded && _tab != TabMode.Cyber ? dipW : double.PositiveInfinity;
+        MaxWidth = expanded && _tab is not (TabMode.Cyber or TabMode.Read)
+            ? dipW
+            : double.PositiveInfinity;
         Height = h / wpfScale;
         MoveWindow(hwnd, x, y, widthPx, h, true);
         if (expanded)
@@ -1034,9 +1030,9 @@ public partial class MainWindow : Window
             }
         }
 
-        // Ctrl+1..6：优先 RegisterHotKey（展开且前台）；未注册时钩子兜底。小键盘热键未登记，仍走钩子。
+        // Ctrl+1..7：优先 RegisterHotKey（展开且前台）；未注册时钩子兜底。小键盘热键未登记，仍走钩子。
         if (!ctrlDown || altDown || shiftDown) return false;
-        var numpad = vk is 0x61 or 0x62 or 0x63 or 0x64 or 0x65 or 0x66;
+        var numpad = vk is 0x61 or 0x62 or 0x63 or 0x64 or 0x65 or 0x66 or 0x67;
         if (_tabHotkeysRegistered && !numpad) return false;
         var digit = vk switch
         {
@@ -1046,6 +1042,7 @@ public partial class MainWindow : Window
             0x34 or 0x64 => 4,
             0x35 or 0x65 => 5,
             0x36 or 0x66 => 6,
+            0x37 or 0x67 => 7,
             _ => 0,
         };
         if (digit == 0) return false;
@@ -1053,7 +1050,7 @@ public partial class MainWindow : Window
         return true;
     }
 
-    /// <summary>Ctrl+1..6 / 钩子数字键共用。</summary>
+    /// <summary>Ctrl+1..7 / 钩子数字键共用。</summary>
     private bool TrySwitchTabByNumber(int digit) => digit switch
     {
         1 => InvokeTabClick(TabNote_Click),
@@ -1062,6 +1059,7 @@ public partial class MainWindow : Window
         4 => InvokeTabClick(TabCyber_Click),
         5 => InvokeTabClick(TabAgent_Click),
         6 => InvokeTabClick(TabFile_Click),
+        7 => InvokeTabClick(TabWeread_Click),
         _ => false,
     };
 
@@ -1305,7 +1303,7 @@ public partial class MainWindow : Window
         }
         if ((uint)msg != WmHotkey) return IntPtr.Zero;
         var id = wParam.ToInt32();
-        if (id is >= HotkeyIdTabBase + 1 and <= HotkeyIdTabBase + 6)
+        if (id is >= HotkeyIdTabBase + 1 and <= HotkeyIdTabBase + 7)
         {
             handled = true;
             var digit = id - HotkeyIdTabBase;
@@ -1370,10 +1368,10 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd == IntPtr.Zero) return;
         var ok = true;
-        for (var i = 1; i <= 6; i++)
+        for (var i = 1; i <= 7; i++)
         {
             var id = HotkeyIdTabBase + i;
-            var vk = (uint)(0x30 + i); // '1'..'6'
+            var vk = (uint)(0x30 + i); // '1'..'7'
             if (!RegisterHotKey(hwnd, id, ModControl | ModNoRepeat, vk)
                 && !RegisterHotKey(hwnd, id, ModControl, vk))
                 ok = false;
@@ -1387,7 +1385,7 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         if (hwnd != IntPtr.Zero)
         {
-            for (var i = 1; i <= 6; i++)
+            for (var i = 1; i <= 7; i++)
                 UnregisterHotKey(hwnd, HotkeyIdTabBase + i);
         }
         _tabHotkeysRegistered = false;
@@ -1570,7 +1568,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Ctrl+1..6：钩子未装上时的后备
+        // Ctrl+1..7：钩子未装上时的后备
         if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
             && (Keyboard.Modifiers & (ModifierKeys.Alt | ModifierKeys.Shift)) == ModifierKeys.None)
         {
@@ -1582,6 +1580,7 @@ public partial class MainWindow : Window
                 Key.D4 or Key.NumPad4 => 4,
                 Key.D5 or Key.NumPad5 => 5,
                 Key.D6 or Key.NumPad6 => 6,
+                Key.D7 or Key.NumPad7 => 7,
                 _ => 0,
             };
             if (digit != 0 && TrySwitchTabByNumber(digit))
@@ -1749,6 +1748,32 @@ public partial class MainWindow : Window
         AddItem("文件搜索\tAlt+空格", (_, _) => Dispatcher.Invoke(FocusFileSearchFromHotkey));
         AddItem("大模型输入\tCtrl+空格", (_, _) => Dispatcher.Invoke(FocusAgentInputFromHotkey));
         AddItem("收起侧栏", (_, _) => Dispatcher.Invoke(Collapse));
+        _trayFencesItem = new WinForms.ToolStripMenuItem("显示桌面围栏")
+        {
+            CheckOnClick = true,
+            ForeColor = TrayTheme.Fg,
+            BackColor = TrayTheme.Panel,
+            Padding = new WinForms.Padding(2, 4, 8, 4),
+        };
+        _trayFencesItem.CheckedChanged += (_, _) =>
+        {
+            if (_trayFenceMenuUpdating || _trayFencesItem is null) return;
+            var show = _trayFencesItem.Checked;
+            Dispatcher.Invoke(() =>
+            {
+                if (show)
+                {
+                    if (!DesktopBox.DesktopBoxRuntime.IsRunning)
+                        DesktopBox.DesktopBoxRuntime.TryStart(allowOnBattery: true);
+                    DesktopBox.DesktopBoxRuntime.SetPaused(false);
+                }
+                else
+                {
+                    DesktopBox.DesktopBoxRuntime.SetPaused(true);
+                }
+            });
+        };
+        menu.Items.Add(_trayFencesItem);
         menu.Items.Add(new WinForms.ToolStripSeparator { BackColor = TrayTheme.Panel });
         AddItem("登录并同步", async (_, _) => await Dispatcher.InvokeAsync(async () => await RunSyncAsync(true)));
         AddItem("打开同步配置", (_, _) => Dispatcher.Invoke(OpenSyncConfig));
@@ -1782,6 +1807,12 @@ public partial class MainWindow : Window
         {
             pin.Checked = _pinned;
             auto.Checked = Autostart.IsEnabled();
+            if (_trayFencesItem is not null)
+            {
+                _trayFenceMenuUpdating = true;
+                _trayFencesItem.Checked = !DesktopBox.DesktopBoxRuntime.IsPaused;
+                _trayFenceMenuUpdating = false;
+            }
         };
         menu.Items.Add(pin);
         menu.Items.Add(auto);
@@ -2520,6 +2551,110 @@ public partial class MainWindow : Window
         _tab = TabMode.Cyber;
         StyleTabs();
         _ = EnterCyberTabAsync();
+    }
+
+    private void TabWeread_Click(object sender, MouseButtonEventArgs e)
+    {
+        FlushNoteSave();
+        RefreshNoteChipTitlesIfNeeded();
+        ExitTodoEditMode();
+        _tab = TabMode.Read;
+        StyleTabs();
+        _ = EnterWereadTabAsync();
+    }
+
+    private async Task EnterWereadTabAsync()
+    {
+        // 进读书页强制满屏重定位（与网安一致）
+        _lastPlaceX = int.MinValue;
+        if (_expanded) PlaceExpanded();
+        WereadHint.Text = "正在打开微信读书…";
+        WereadHint.Visibility = Visibility.Visible;
+        await EnsureWereadWebAsync();
+    }
+
+    private async void BtnWereadRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await EnsureWereadWebAsync();
+            if (WereadWeb.CoreWebView2 != null)
+                WereadWeb.CoreWebView2.Reload();
+        }
+        catch { /* ignore */ }
+    }
+
+    private void BtnWereadExternal_Click(object sender, RoutedEventArgs e)
+    {
+        var url = WereadWeb.CoreWebView2?.Source;
+        OpenExternalUrl(string.IsNullOrWhiteSpace(url) ? WereadHomeUrl : url);
+    }
+
+    private async Task EnsureWereadWebAsync()
+    {
+        try
+        {
+            if (!_wereadWebReady || WereadWeb.CoreWebView2 is null)
+            {
+                var dataDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "DeskWidgets",
+                    "WereadWebView2");
+                Directory.CreateDirectory(dataDir);
+                var env = await CoreWebView2Environment.CreateAsync(userDataFolder: dataDir);
+                await WereadWeb.EnsureCoreWebView2Async(env);
+                if (WereadWeb.CoreWebView2 is null)
+                {
+                    WereadHint.Text = "未安装 WebView2 Runtime，可点「浏览器」打开。";
+                    return;
+                }
+
+                var settings = WereadWeb.CoreWebView2.Settings;
+                settings.AreDefaultContextMenusEnabled = true;
+                settings.IsStatusBarEnabled = false;
+                settings.AreDevToolsEnabled = false;
+                settings.IsZoomControlEnabled = true;
+                WereadWeb.ZoomFactor = 1.0;
+                WereadWeb.CoreWebView2.NewWindowRequested += (_, e) =>
+                {
+                    e.Handled = true;
+                    if (IsHttpOrHttps(e.Uri))
+                        OpenExternalUrl(e.Uri);
+                };
+                WereadWeb.CoreWebView2.NavigationCompleted += (_, e) =>
+                {
+                    if (_tab != TabMode.Read) return;
+                    if (e.IsSuccess)
+                    {
+                        WereadHint.Visibility = Visibility.Collapsed;
+                        WereadWeb.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        WereadHint.Text = "页面加载失败，可点「刷新」或「浏览器」。";
+                        WereadHint.Visibility = Visibility.Visible;
+                    }
+                };
+                _wereadWebReady = true;
+            }
+
+            if (!_wereadNavigated && WereadWeb.CoreWebView2 != null)
+            {
+                _wereadNavigated = true;
+                WereadWeb.CoreWebView2.Navigate(WereadHomeUrl);
+            }
+            else if (WereadWeb.CoreWebView2 != null)
+            {
+                WereadHint.Visibility = Visibility.Collapsed;
+                WereadWeb.Visibility = Visibility.Visible;
+            }
+        }
+        catch (Exception ex)
+        {
+            _wereadWebReady = false;
+            WereadHint.Text = "无法启动阅读页：" + ShortErr(ex);
+            WereadHint.Visibility = Visibility.Visible;
+        }
     }
 
     private async Task EnterCyberTabAsync()
@@ -3429,6 +3564,7 @@ public partial class MainWindow : Window
         Paint(TabTodoBorder, TabTodoText, _tab == TabMode.Todo);
         Paint(TabMailBorder, TabMailText, _tab == TabMode.Mail);
         Paint(TabCyberBorder, TabCyberText, _tab == TabMode.Cyber);
+        Paint(TabWereadBorder, TabWereadText, _tab == TabMode.Read);
         Paint(TabAgentBorder, TabAgentText, _tab == TabMode.Agent);
         Paint(TabFileBorder, TabFileText, _tab == TabMode.File);
 
@@ -3436,6 +3572,7 @@ public partial class MainWindow : Window
         TodoPanel.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         MailPanel.Visibility = _tab == TabMode.Mail ? Visibility.Visible : Visibility.Collapsed;
         CyberNewsPanel.Visibility = _tab == TabMode.Cyber ? Visibility.Visible : Visibility.Collapsed;
+        WereadPanel.Visibility = _tab == TabMode.Read ? Visibility.Visible : Visibility.Collapsed;
         AgentPanel.Visibility = _tab == TabMode.Agent ? Visibility.Visible : Visibility.Collapsed;
         FilePanel.Visibility = _tab == TabMode.File ? Visibility.Visible : Visibility.Collapsed;
         // 日历只在「待办事项」显示

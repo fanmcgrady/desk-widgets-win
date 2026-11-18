@@ -249,7 +249,7 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
     {
         if (_loading) return;
         if (ChkShowFences.IsChecked == true && !DesktopBoxRuntime.IsRunning)
-            DesktopBoxRuntime.TryStart();
+            DesktopBoxRuntime.TryStart(allowOnBattery: true);
         DesktopBoxRuntime.SetPaused(ChkShowFences.IsChecked != true);
         StatusText.Text = ChkShowFences.IsChecked == true ? "围栏已显示" : "围栏已隐藏";
     }

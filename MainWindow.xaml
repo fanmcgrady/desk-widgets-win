@@ -242,6 +242,11 @@
             </Border>
           </StackPanel>
         </Border>
+        <Border x:Name="TabWereadBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabWeread_Click" Padding="0,0,0,6" ToolTip="微信读书 · Ctrl+7">
+          <TextBlock x:Name="TabWereadText" Text="读书" FontSize="13" Foreground="{StaticResource Muted}"/>
+        </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
                 MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Ctrl+5 · Ctrl+空格">
@@ -748,6 +753,33 @@
               </ScrollViewer>
             </Border>
           </DockPanel>
+        </DockPanel>
+
+        <!-- 微信读书：懒加载 WebView，进页加宽 -->
+        <DockPanel x:Name="WereadPanel" Visibility="Collapsed">
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6" LastChildFill="False" MinHeight="28">
+            <TextBlock Text="微信读书" FontWeight="SemiBold" FontSize="13"
+                       VerticalAlignment="Center" Foreground="{StaticResource Fg}"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Content="刷新" Style="{StaticResource MailGhostBtn}"
+                      Click="BtnWereadRefresh_Click" Margin="0,0,4,0"
+                      ToolTip="刷新页面（可续登录态）"/>
+              <Button Content="浏览器" Style="{StaticResource MailGhostBtn}"
+                      Click="BtnWereadExternal_Click"
+                      ToolTip="用系统浏览器打开微信读书"/>
+            </StackPanel>
+          </DockPanel>
+          <Border Background="White" CornerRadius="8"
+                  BorderBrush="#10000000" BorderThickness="1" ClipToBounds="True">
+            <Grid>
+              <TextBlock x:Name="WereadHint" Text="首次打开需微信扫码登录，登录态会保留在本机。"
+                         Foreground="{StaticResource Muted}" FontSize="12"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         TextWrapping="Wrap" Margin="24" TextAlignment="Center"/>
+              <wv2:WebView2 x:Name="WereadWeb" Visibility="Collapsed"
+                            DefaultBackgroundColor="#FFFFFFFF"/>
+            </Grid>
+          </Border>
         </DockPanel>
 
         <!-- 大模型：固定 Agent 模式 -->

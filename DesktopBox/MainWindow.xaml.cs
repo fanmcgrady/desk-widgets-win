@@ -16,7 +16,6 @@ public partial class MainWindow : Window
     private bool _closing;
     private ForegroundWatcher? _foregroundWatcher;
     private ShellMouseRouting? _mouseRouting;
-    private DesktopDoubleClickShow? _desktopShow;
     private StatsAppBarWindow? _statsBar;
     private readonly Dictionary<string, ZoneView> _zones = new();
     private readonly Dictionary<string, Rect> _zoneRects = new();
@@ -109,8 +108,6 @@ public partial class MainWindow : Window
     {
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _syncDebounce.Stop();
-        _desktopShow?.Dispose();
-        _desktopShow = null;
         _mouseRouting?.Dispose();
         _mouseRouting = null;
         _foregroundWatcher?.Dispose();
@@ -180,11 +177,10 @@ public partial class MainWindow : Window
             if (HasHwnd)
                 Visibility = Visibility.Hidden;
             _statsBar?.Pause();
-            EnsureDesktopShowHook(true);
+            // 不再装桌面双击 WH_MOUSE_LL；用托盘「显示围栏」或文件页设置恢复
         }
         else
         {
-            EnsureDesktopShowHook(false);
             _fencesShown = true;
             Visibility = Visibility.Visible;
             EnsureStatsBar();
@@ -195,19 +191,6 @@ public partial class MainWindow : Window
             SyncZOrder(force: true);
             foreach (var z in _zones.Values)
                 z.Reload();
-        }
-    }
-
-    private void EnsureDesktopShowHook(bool enable)
-    {
-        if (enable)
-        {
-            _desktopShow ??= new DesktopDoubleClickShow(() => DesktopBoxRuntime.SetPaused(false));
-            _desktopShow.Start();
-        }
-        else
-        {
-            _desktopShow?.Stop();
         }
     }
 

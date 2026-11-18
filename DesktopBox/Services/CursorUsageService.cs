@@ -65,7 +65,7 @@ internal static class CursorUsageService
         lock (Gate) return _cached;
     }
 
-    private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
 
     private static async Task<CursorUsageInfo> FetchAsync()
     {

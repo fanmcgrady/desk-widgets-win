@@ -21,13 +21,27 @@ public static class DesktopBoxRuntime
 
     public static event Action? PauseChanged;
 
-    public static bool TryStart()
+    /// <param name="allowOnBattery">true：托盘/设置手动开启，电池下也允许；默认启动则电池下跳过。</param>
+    public static bool TryStart(bool allowOnBattery = false)
     {
         // 窗口已被关掉但标志未清时，允许重新拉起
         if (_started && _main is not null && _main.IsLoaded)
             return true;
         if (_started && (_main is null || !_main.IsLoaded))
             CleanupAfterClose();
+
+        if (!allowOnBattery && PowerBudget.OnBattery)
+        {
+            try
+            {
+                Directory.CreateDirectory(AppConfig.ConfigDirectory);
+                File.AppendAllText(
+                    Path.Combine(AppConfig.ConfigDirectory, "debug.log"),
+                    $"{DateTime.Now:HH:mm:ss.fff} fence skip start (on battery)\n");
+            }
+            catch { /* ignore */ }
+            return false;
+        }
 
         // 关掉独立 DesktopBox.exe，避免双实例抢互斥体
         foreach (var p in Process.GetProcessesByName("DesktopBox"))
