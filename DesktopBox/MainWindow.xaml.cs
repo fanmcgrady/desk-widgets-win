@@ -335,7 +335,7 @@ public partial class MainWindow : Window
         if (_zoneRects.Count == 0)
             return "";
         var parts = new List<string>(_zoneRects.Count);
-        foreach (var id in new[] { "project", "teaching", "affairs", "todo" })
+        foreach (var id in new[] { "project", "affairs", "todo" })
         {
             if (!_zoneRects.TryGetValue(id, out var r))
                 continue;
@@ -354,7 +354,7 @@ public partial class MainWindow : Window
         _zoneRects.Clear();
         _lastRegionKey = "";
 
-        string[] order = ["project", "teaching", "affairs", "todo"];
+        string[] order = ["project", "affairs", "todo"];
         foreach (var id in order)
         {
             var cfg = _config.FindZone(id);
@@ -398,8 +398,8 @@ public partial class MainWindow : Window
         var lowTop = cy + gy;
         var lowBottom = h - bottomPad;
 
-        Place("project", 0, 0, cx - gx, topBottom);
-        Place("teaching", cx + gx, 0, w - (cx + gx), topBottom);
+        // 左上角留空给桌面图标；项目区占右上
+        Place("project", cx + gx, 0, w - (cx + gx), topBottom);
         Place("affairs", 0, lowTop, cx - gx, lowBottom - lowTop);
         Place("todo", cx + gx, lowTop, w - (cx + gx), lowBottom - lowTop);
     }

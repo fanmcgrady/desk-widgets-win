@@ -5,13 +5,10 @@ using System.Windows.Threading;
 
 namespace DesktopBox.Services;
 
-/// <summary>采样 Cursor 用量 / 流量 / Wi‑Fi / 开机。</summary>
+/// <summary>采样 Cursor 用量 / Wi‑Fi / 开机时长。</summary>
 internal sealed class SystemStatsService : IDisposable
 {
     private readonly DispatcherTimer _timer;
-    private long _prevRecv = -1;
-    private long _prevSent = -1;
-    private DateTime _prevUtc = DateTime.MinValue;
     private bool _started;
     private int _tick;
     private WifiInfo _lastWifi = WifiInfo.Unavailable;
@@ -31,11 +28,8 @@ internal sealed class SystemStatsService : IDisposable
     {
         if (_started) return;
         _started = true;
-        SnapshotNet(out _prevRecv, out _prevSent);
-        _prevUtc = DateTime.UtcNow;
         _tick = 0;
         _timer.Interval = PowerBudget.StatsInterval;
-        // 启动立刻拉一次用量（后台），并马上刷一帧，避免底栏先空白
         _ = CursorUsageService.PeekAndRefresh();
         _timer.Start();
         Tick();
@@ -45,8 +39,6 @@ internal sealed class SystemStatsService : IDisposable
     {
         _timer.Stop();
         _started = false;
-        _prevRecv = -1;
-        _prevSent = -1;
     }
 
     public void Dispose()
@@ -59,19 +51,11 @@ internal sealed class SystemStatsService : IDisposable
     {
         try
         {
-            // 市电/电池切换时跟着改间隔
-            var want = PowerBudget.StatsInterval;
-            if (_timer.Interval != want)
-                _timer.Interval = want;
-
             var usage = CursorUsageService.PeekAndRefresh();
-            // WLAN API 偏重：电池下隔几次才查
-            var n = Math.Max(1, PowerBudget.WifiEveryNTicks);
-            if (_tick++ % n == 0)
+            if (_tick++ % PowerBudget.WifiEveryNTicks == 0)
                 _lastWifi = ReadWifiSafe();
-            ReadNetRates(out var down, out var up);
             var uptime = TimeSpan.FromMilliseconds(GetTickCount64());
-            Sampled?.Invoke(this, new SystemStatsSample(usage, down, up, _lastWifi, uptime));
+            Sampled?.Invoke(this, new SystemStatsSample(usage, _lastWifi, uptime));
         }
         catch
         {
@@ -100,13 +84,12 @@ internal sealed class SystemStatsService : IDisposable
             {
                 var numberOfItems = Marshal.ReadInt32(listPtr);
                 var itemSize = Marshal.SizeOf<WlanInterfaceInfo>();
-                // WLAN_INTERFACE_INFO_LIST: dwNumberOfItems + dwIndex = 8
                 var itemPtr = listPtr + 8;
 
                 for (var i = 0; i < numberOfItems; i++)
                 {
                     var info = Marshal.PtrToStructure<WlanInterfaceInfo>(itemPtr + i * itemSize);
-                    if (info.State != 1) // connected
+                    if (info.State != 1)
                         continue;
 
                     var guid = info.InterfaceGuid;
@@ -117,10 +100,8 @@ internal sealed class SystemStatsService : IDisposable
 
                     try
                     {
-                        // WLAN_CONNECTION_ATTRIBUTES (x64)：
-                        // isState+connMode=8，strProfileName[256]=512，assoc 从 520
                         const int profileOff = 8;
-                        const int assoc = profileOff + 256 * 2; // 520
+                        const int assoc = profileOff + 256 * 2;
                         var profile = Marshal.PtrToStringUni(IntPtr.Add(data, profileOff))?.Trim() ?? "";
                         if (profile.Length > 64) profile = profile[..64];
 
@@ -130,13 +111,11 @@ internal sealed class SystemStatsService : IDisposable
                         {
                             var bytes = new byte[ssidLen];
                             Marshal.Copy(IntPtr.Add(data, assoc + 4), bytes, 0, ssidLen);
-                            // SSID 常为 UTF-8；若像乱码再试 Latin1 原始字节当 ANSI
                             ssid = Encoding.UTF8.GetString(bytes).Trim('\0').Trim();
                             if (ssid.Any(ch => ch < 0x20 && ch != '\t'))
                                 ssid = Encoding.Default.GetString(bytes).Trim('\0').Trim();
                         }
 
-                        // DOT11_SSID(36)+bssType(4)+bssid(6)+pad(2)+phyType(4)+phyIndex(4)=56
                         var quality = Marshal.ReadInt32(data, assoc + 56);
                         quality = Math.Clamp(quality, 0, 100);
 
@@ -204,68 +183,6 @@ internal sealed class SystemStatsService : IDisposable
         return false;
     }
 
-    private void ReadNetRates(out double down, out double up)
-    {
-        down = 0;
-        up = 0;
-        SnapshotNet(out var recv, out var sent);
-        var now = DateTime.UtcNow;
-        if (_prevRecv < 0 || _prevSent < 0)
-        {
-            _prevRecv = recv;
-            _prevSent = sent;
-            _prevUtc = now;
-            return;
-        }
-
-        var dt = (now - _prevUtc).TotalSeconds;
-        if (dt < 0.2) return;
-
-        down = Math.Max(0, (recv - _prevRecv) / dt);
-        up = Math.Max(0, (sent - _prevSent) / dt);
-        _prevRecv = recv;
-        _prevSent = sent;
-        _prevUtc = now;
-    }
-
-    private static void SnapshotNet(out long recv, out long sent)
-    {
-        long r = 0, s = 0;
-        try
-        {
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (nic.OperationalStatus != OperationalStatus.Up)
-                    continue;
-                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback
-                    or NetworkInterfaceType.Tunnel)
-                    continue;
-                try
-                {
-                    var stats = nic.GetIPStatistics();
-                    r += stats.BytesReceived;
-                    s += stats.BytesSent;
-                }
-                catch { /* skip */ }
-            }
-        }
-        catch { /* ignore */ }
-
-        recv = r;
-        sent = s;
-    }
-
-    public static string FormatRate(double bytesPerSec)
-    {
-        if (bytesPerSec < 1024)
-            return $"{bytesPerSec:0} B/s";
-        if (bytesPerSec < 1024 * 1024)
-            return $"{bytesPerSec / 1024:0.0} KB/s";
-        if (bytesPerSec < 1024L * 1024 * 1024)
-            return $"{bytesPerSec / (1024 * 1024):0.00} MB/s";
-        return $"{bytesPerSec / (1024 * 1024 * 1024):0.00} GB/s";
-    }
-
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WlanInterfaceInfo
     {
@@ -319,7 +236,5 @@ internal readonly record struct WifiInfo(bool Connected, int SignalPercent, stri
 
 internal readonly record struct SystemStatsSample(
     CursorUsageInfo Cursor,
-    double DownBytesPerSec,
-    double UpBytesPerSec,
     WifiInfo Wifi,
     TimeSpan Uptime);

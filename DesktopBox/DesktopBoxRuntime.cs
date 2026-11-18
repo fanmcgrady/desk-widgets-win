@@ -80,7 +80,7 @@ public static class DesktopBoxRuntime
         _autoSort = new DesktopAutoSortService(config);
         _autoSort.Start();
 
-        ShellWheelHook.Install();
+        // 不装全局 WH_MOUSE_LL：滚轮改由 ZoneDragMoveForce / ShellMouseRouting 处理，减轻全系统鼠标开销
         _started = true;
         IsPaused = false;
         return true;

@@ -23,17 +23,15 @@ public partial class StatsAppBarWindow : Window
     private static readonly SolidColorBrush WifiBarRed = CreateFrozenBrush(0xE8, 0x11, 0x23);
     private static readonly SolidColorBrush WifiBarGray = CreateFrozenBrush(0xA0, 0xA0, 0xA0);
     private static readonly SolidColorBrush WifiTextMuted = CreateFrozenBrush(0x99, 0x99, 0x99);
+    private static readonly SolidColorBrush CursorBarOrange = CreateFrozenBrush(0xF7, 0x63, 0x0C);
+    private static readonly SolidColorBrush CursorBarRed = CreateFrozenBrush(0xE8, 0x11, 0x23);
     private static readonly SolidColorBrush CursorBarBlue = CreateFrozenBrush(0x00, 0x78, 0xD4);
-    private static readonly SolidColorBrush NoticeMuted = CreateFrozenBrush(0x88, 0x88, 0x88);
     private static readonly SolidColorBrush NoticeFlashFg = CreateFrozenBrush(0x1B, 0x5E, 0x20);
     private static readonly SolidColorBrush NoticeBadgeGreen = CreateFrozenBrush(0x10, 0x7C, 0x10);
-    private static readonly System.Windows.Media.Color NoticeFlashBgBright = System.Windows.Media.Color.FromRgb(0xA5, 0xD6, 0xA7);
-    private static readonly System.Windows.Media.Color NoticeFlashBgSoft = System.Windows.Media.Color.FromRgb(0xE8, 0xF5, 0xE9);
-    private static readonly System.Windows.Media.Color NoticeBgClear = System.Windows.Media.Color.FromArgb(0, 0xF7, 0xF7, 0xF7);
+    private static readonly System.Windows.Media.Color NoticeFlashBg = System.Windows.Media.Color.FromRgb(0xE8, 0xF5, 0xE9);
 
     private readonly SystemStatsService _stats = new();
     private readonly ClipboardWatcher _clipboard = new();
-    private readonly DispatcherTimer _noticeFade;
     private Storyboard? _noticeStory;
     private HwndSource? _source;
     private IntPtr _hwnd;
@@ -45,8 +43,6 @@ public partial class StatsAppBarWindow : Window
     {
         InitializeComponent();
         Height = BarHeightDip;
-        _noticeFade = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-        _noticeFade.Tick += (_, _) => SettleNotice();
         SourceInitialized += OnSourceInitialized;
         Closed += OnClosed;
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
@@ -103,7 +99,6 @@ public partial class StatsAppBarWindow : Window
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _stats.Sampled -= OnStatsSampled;
         _clipboard.Changed -= OnClipboardChanged;
-        _noticeFade.Stop();
         _noticeStory?.Stop();
         _stats.Dispose();
         _clipboard.Dispose();
@@ -262,63 +257,48 @@ public partial class StatsAppBarWindow : Window
         NoticeText.Text = preview;
         NoticeText.ToolTip = string.IsNullOrEmpty(preview) ? "已复制" : preview;
         NoticeText.Foreground = NoticeFlashFg;
-        PlayCopyFlash();
-        _noticeFade.Stop();
-        _noticeFade.Start();
+        PlayCopyTip();
     }
 
-    private void PlayCopyFlash()
+    /// <summary>淡入 → 保留约 10s → 淡出清空。</summary>
+    private void PlayCopyTip()
     {
         _noticeStory?.Stop();
-
-        var bg = new SolidColorBrush(NoticeFlashBgBright);
-        NoticePanel.Background = bg;
-
-        NoticeSlide.X = 16;
+        NoticePanel.Background = new SolidColorBrush(NoticeFlashBg);
         NoticeContent.Opacity = 0;
+        NoticeSlide.X = 0;
 
         var sb = new Storyboard();
 
-        var slide = new DoubleAnimation(16, 0, TimeSpan.FromMilliseconds(220))
+        var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180))
         {
             EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
         };
-        Storyboard.SetTarget(slide, NoticeSlide);
-        Storyboard.SetTargetProperty(slide, new PropertyPath(TranslateTransform.XProperty));
-        sb.Children.Add(slide);
-
-        var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160));
         Storyboard.SetTarget(fadeIn, NoticeContent);
         Storyboard.SetTargetProperty(fadeIn, new PropertyPath(UIElement.OpacityProperty));
         sb.Children.Add(fadeIn);
 
-        var bgAnim = new ColorAnimation(NoticeFlashBgBright, NoticeFlashBgSoft, TimeSpan.FromMilliseconds(480))
+        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(280))
         {
-            BeginTime = TimeSpan.FromMilliseconds(80),
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            BeginTime = TimeSpan.FromSeconds(10),
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn }
         };
-        Storyboard.SetTarget(bgAnim, bg);
-        Storyboard.SetTargetProperty(bgAnim, new PropertyPath(SolidColorBrush.ColorProperty));
-        sb.Children.Add(bgAnim);
+        Storyboard.SetTarget(fadeOut, NoticeContent);
+        Storyboard.SetTargetProperty(fadeOut, new PropertyPath(UIElement.OpacityProperty));
+        sb.Children.Add(fadeOut);
 
+        sb.Completed += (_, _) => ClearNotice();
         _noticeStory = sb;
         sb.Begin();
     }
 
-    private void SettleNotice()
+    private void ClearNotice()
     {
-        _noticeFade.Stop();
-        NoticeText.Foreground = NoticeMuted;
-        NoticeBadge.Background = CreateFrozenBrush(0x90, 0xA4, 0xAE);
-        if (NoticePanel.Background is SolidColorBrush live)
-        {
-            var fadeBg = new ColorAnimation(live.Color, NoticeBgClear, TimeSpan.FromMilliseconds(400));
-            live.BeginAnimation(SolidColorBrush.ColorProperty, fadeBg);
-        }
-        else
-        {
-            NoticePanel.Background = System.Windows.Media.Brushes.Transparent;
-        }
+        NoticeBadge.Visibility = Visibility.Collapsed;
+        NoticeText.Text = "";
+        NoticeText.ToolTip = null;
+        NoticeContent.Opacity = 0;
+        NoticePanel.Background = System.Windows.Media.Brushes.Transparent;
     }
 
     private void OnStatsSampled(object? sender, SystemStatsSample sample)
@@ -338,8 +318,8 @@ public partial class StatsAppBarWindow : Window
             StatsCursorHint.Text = string.IsNullOrWhiteSpace(usage.ResetHint)
                 ? "已用"
                 : usage.ResetHint!;
-            StatsCursorBar.Background = used >= 90 ? WifiBarRed
-                : used >= 70 ? WifiBarOrange
+            StatsCursorBar.Background = used >= 90 ? CursorBarRed
+                : used >= 70 ? CursorBarOrange
                 : CursorBarBlue;
             StatsCursorBar.Width = track * (used / 100.0);
             return;

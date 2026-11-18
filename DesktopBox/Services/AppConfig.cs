@@ -23,7 +23,7 @@ public sealed class AppConfig
 
     public static string ConfigPath => Path.Combine(ConfigDirectory, "config.json");
 
-    /// <summary>围栏根目录：项目/教学/待办等分区所在位置（桌面上的「桌面分区」）。</summary>
+    /// <summary>围栏根目录：项目/待办等分区所在位置（桌面上的「桌面分区」）。</summary>
     public static string DefaultRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "桌面分区");
 
@@ -37,9 +37,10 @@ public sealed class AppConfig
         {
             var json = File.ReadAllText(ConfigPath);
             var loaded = JsonSerializer.Deserialize<AppConfig>(json, JsonOptions);
-            if (loaded is not null && loaded.Zones.Count == 4)
+            if (loaded is not null && loaded.Zones.Count > 0)
             {
                 loaded.Normalize();
+                loaded.Save();
                 return loaded;
             }
         }
@@ -60,7 +61,6 @@ public sealed class AppConfig
             Zones =
             [
                 new ZoneConfig { Id = "project", Name = "项目区", English = "PROJECT", Folder = Path.Combine(root, "项目区") },
-                new ZoneConfig { Id = "teaching", Name = "教学区", English = "TEACHING", Folder = Path.Combine(root, "教学区") },
                 new ZoneConfig { Id = "affairs", Name = "待办区", English = "TODO", Folder = Path.Combine(root, "待办区") },
                 new ZoneConfig { Id = "todo", Name = "内存", English = "MEMORY", Folder = DefaultMemoryRoot }
             ]
@@ -73,6 +73,8 @@ public sealed class AppConfig
         AutoSort ??= new AutoSortConfig();
         if (string.IsNullOrWhiteSpace(AutoSort.TargetZoneId))
             AutoSort.TargetZoneId = "todo";
+        // 教学区已取消：左上角留给桌面图标
+        Zones.RemoveAll(z => z.Id == "teaching");
         if (Zones.Count == 0)
             Zones = CreateDefault().Zones;
     }

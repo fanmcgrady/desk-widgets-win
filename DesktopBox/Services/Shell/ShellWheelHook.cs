@@ -28,27 +28,11 @@ internal static class ShellWheelHook
     private static IntPtr _hook = IntPtr.Zero;
     private static int _logBudget = 20;
 
+    /// <summary>默认不安装全局钩子。需要排查滚轮时可再打开内部实现。</summary>
     public static void Install()
     {
-        if (_hook != IntPtr.Zero)
-            return;
-
-        var hMod = Marshal.GetHINSTANCE(typeof(ShellWheelHook).Module);
-        if (hMod == IntPtr.Zero)
-            hMod = GetModuleHandle("DesktopBox.dll");
-        if (hMod == IntPtr.Zero)
-        {
-            using var process = Process.GetCurrentProcess();
-            using var module = process.MainModule;
-            hMod = GetModuleHandle(module?.ModuleName);
-        }
-
-        _hook = SetWindowsHookEx(WhMouseLl, Proc, hMod, 0);
-        var err = Marshal.GetLastWin32Error();
-        Log(_hook == IntPtr.Zero
-            ? $"wheel hook install FAILED err={err} hMod={hMod}"
-            : $"wheel hook install ok hMod={hMod}");
-        _logBudget = 20;
+        // 关闭 WH_MOUSE_LL，避免全系统滚轮回调拖慢鼠标
+        Log("wheel hook Install skipped (disabled by default)");
     }
 
     public static void Uninstall()

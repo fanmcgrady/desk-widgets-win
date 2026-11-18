@@ -15,6 +15,9 @@ namespace DesktopBox.Services.Shell;
 /// </summary>
 internal sealed class ExplorerBrowserHost : HwndHost
 {
+    /// <summary>Details：行高紧、按列对齐；列宽只在创建/横向尺寸变化时算。</summary>
+    private const FolderViewMode PreferredViewMode = FolderViewMode.Details;
+
     private readonly string _rootPath;
     private IntPtr _hwndHost = IntPtr.Zero;
     private MiniShellBrowser? _browser;
@@ -685,7 +688,6 @@ internal sealed class ExplorerBrowserHost : HwndHost
             _lastViewH = h;
         }
 
-        // 列宽只在横向尺寸变化时重算，避免定时重摆把列表刷闪
         if (_shellView is not null && w != _lastColumnsW)
         {
             ApplyDetailsColumns(_shellView, w);
@@ -767,7 +769,7 @@ internal sealed class ExplorerBrowserHost : HwndHost
 
             var settings = new FolderSettings
             {
-                ViewMode = (uint)FolderViewMode.Details,
+                ViewMode = (uint)PreferredViewMode,
                 FFlags = (uint)(FolderFlags.AutoArrange | FolderFlags.NoClientEdge | FolderFlags.ShowSelAlways)
             };
 
@@ -784,6 +786,8 @@ internal sealed class ExplorerBrowserHost : HwndHost
             var viewW = client.Right - client.Left;
             ApplyDetailsColumns(_shellView, viewW);
             ApplyColumnLayout(_hwndView, viewW);
+            _lastColumnsW = viewW;
+
             var hwndView = _hwndView;
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
             {
@@ -794,11 +798,6 @@ internal sealed class ExplorerBrowserHost : HwndHost
                     if (lv != IntPtr.Zero)
                         ZoneDragMoveForce.RegisterAlias(lv, this);
                 }
-            });
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
-            {
-                if (_hwndView == hwndView && hwndView != IntPtr.Zero)
-                    ApplyColumnLayout(hwndView, ReadHostClientWidth());
             });
             _currentPath = Path.GetFullPath(folder);
             if (_history.Count == 0)

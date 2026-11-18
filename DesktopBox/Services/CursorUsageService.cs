@@ -65,8 +65,7 @@ internal static class CursorUsageService
         lock (Gate) return _cached;
     }
 
-    private static TimeSpan RefreshInterval =>
-        PowerBudget.OnBattery ? TimeSpan.FromMinutes(15) : TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
 
     private static async Task<CursorUsageInfo> FetchAsync()
     {

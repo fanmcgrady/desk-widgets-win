@@ -34,13 +34,13 @@ internal sealed class DesktopAutoSortService : IDisposable
         Directory.CreateDirectory(_desktop);
         _watcher = new FileSystemWatcher(_desktop)
         {
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            // 只看创建/改名，去掉 LastWrite/Size，避免下载写入时反复触发
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName,
             IncludeSubdirectories = false,
             EnableRaisingEvents = true
         };
         _watcher.Created += OnCreated;
         _watcher.Renamed += OnRenamed;
-        _watcher.Changed += OnChanged;
 
         _debounceTimer = new System.Threading.Timer(_ => FlushPending(), null, Timeout.Infinite, Timeout.Infinite);
         Log("auto-sort started");
@@ -57,8 +57,6 @@ internal sealed class DesktopAutoSortService : IDisposable
     }
 
     private void OnCreated(object sender, FileSystemEventArgs e) => Queue(e.FullPath);
-
-    private void OnChanged(object sender, FileSystemEventArgs e) => Queue(e.FullPath);
 
     private void OnRenamed(object sender, RenamedEventArgs e) => Queue(e.FullPath);
 

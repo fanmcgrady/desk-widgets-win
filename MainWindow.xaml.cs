@@ -210,29 +210,11 @@ public partial class MainWindow : Window
                 await TrySyncSilentAsync();
         };
 
-        // 邮件未读静默轮询；电池下拉长间隔
-        _mailPollTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMinutes(DesktopBox.Services.PowerBudget.OnBattery ? 12 : 5)
-        };
-        _mailPollTimer.Tick += async (_, _) =>
-        {
-            _mailPollTimer.Interval = TimeSpan.FromMinutes(
-                DesktopBox.Services.PowerBudget.OnBattery ? 12 : 5);
-            await PollMailUnreadAsync(silent: true);
-        };
+        _mailPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(5) };
+        _mailPollTimer.Tick += async (_, _) => await PollMailUnreadAsync(silent: true);
 
-        // 网安热点静默拉取；电池下拉长间隔
-        _cyberPollTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMinutes(DesktopBox.Services.PowerBudget.OnBattery ? 30 : 15)
-        };
-        _cyberPollTimer.Tick += async (_, _) =>
-        {
-            _cyberPollTimer.Interval = TimeSpan.FromMinutes(
-                DesktopBox.Services.PowerBudget.OnBattery ? 30 : 15);
-            await PollCyberNewsAsync(silent: true);
-        };
+        _cyberPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
+        _cyberPollTimer.Tick += async (_, _) => await PollCyberNewsAsync(silent: true);
 
         _fileSearchTimer.Tick += async (_, _) =>
         {
@@ -1360,7 +1342,7 @@ public partial class MainWindow : Window
         SyncEdgeTimerInterval();
     }
 
-    /// <summary>收起/贴边/展开探测间隔；电池下整体放慢，少叫醒 CPU。</summary>
+    /// <summary>收起/贴边/展开探测间隔。</summary>
     private void SyncEdgeTimerInterval()
     {
         int ms;
