@@ -52,6 +52,7 @@ public partial class MainWindow : Window
     private bool _cyberWebNavHooked;
     private bool _wereadWebReady;
     private bool _wereadNavigated;
+    private Microsoft.Web.WebView2.Wpf.WebView2? _wereadWeb;
     /// <summary>详情导航代数：连按切换时只认最新一次。</summary>
     private int _cyberWebNavEpoch;
     private string? _cyberWebTargetUrl;
@@ -268,15 +269,14 @@ public partial class MainWindow : Window
         // 不启动邮件/网安后台轮询；进对应页签时再拉
         UpdateCyberBadge();
 
+        // 默认启动桌面围栏（电池下仍跳过）；托盘/设置可关
         Dispatcher.BeginInvoke(() =>
         {
             try
             {
-                // 电池下默认不启围栏（省电）；托盘/设置可手动 allowOnBattery 拉起
                 if (!DesktopBoxRuntime.TryStart())
                     System.Diagnostics.Debug.WriteLine("DesktopBoxRuntime: skipped or mutex busy");
-                else
-                    FenceSettings.ReloadFromDisk();
+                FenceSettings.ReloadFromDisk();
             }
             catch (Exception ex)
             {
@@ -1810,7 +1810,8 @@ public partial class MainWindow : Window
             if (_trayFencesItem is not null)
             {
                 _trayFenceMenuUpdating = true;
-                _trayFencesItem.Checked = !DesktopBox.DesktopBoxRuntime.IsPaused;
+                _trayFencesItem.Checked = DesktopBox.DesktopBoxRuntime.IsRunning
+                    && !DesktopBox.DesktopBoxRuntime.IsPaused;
                 _trayFenceMenuUpdating = false;
             }
         };
@@ -2578,15 +2579,14 @@ public partial class MainWindow : Window
         try
         {
             await EnsureWereadWebAsync();
-            if (WereadWeb.CoreWebView2 != null)
-                WereadWeb.CoreWebView2.Reload();
+            _wereadWeb?.CoreWebView2?.Reload();
         }
         catch { /* ignore */ }
     }
 
     private void BtnWereadExternal_Click(object sender, RoutedEventArgs e)
     {
-        var url = WereadWeb.CoreWebView2?.Source;
+        var url = _wereadWeb?.CoreWebView2?.Source;
         OpenExternalUrl(string.IsNullOrWhiteSpace(url) ? WereadHomeUrl : url);
     }
 
@@ -2594,7 +2594,17 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (!_wereadWebReady || WereadWeb.CoreWebView2 is null)
+            if (_wereadWeb is null)
+            {
+                _wereadWeb = new Microsoft.Web.WebView2.Wpf.WebView2
+                {
+                    Visibility = Visibility.Collapsed,
+                    DefaultBackgroundColor = System.Drawing.Color.White
+                };
+                WereadWebHost.Children.Add(_wereadWeb);
+            }
+
+            if (!_wereadWebReady || _wereadWeb.CoreWebView2 is null)
             {
                 var dataDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -2602,32 +2612,32 @@ public partial class MainWindow : Window
                     "WereadWebView2");
                 Directory.CreateDirectory(dataDir);
                 var env = await CoreWebView2Environment.CreateAsync(userDataFolder: dataDir);
-                await WereadWeb.EnsureCoreWebView2Async(env);
-                if (WereadWeb.CoreWebView2 is null)
+                await _wereadWeb.EnsureCoreWebView2Async(env);
+                if (_wereadWeb.CoreWebView2 is null)
                 {
                     WereadHint.Text = "未安装 WebView2 Runtime，可点「浏览器」打开。";
                     return;
                 }
 
-                var settings = WereadWeb.CoreWebView2.Settings;
+                var settings = _wereadWeb.CoreWebView2.Settings;
                 settings.AreDefaultContextMenusEnabled = true;
                 settings.IsStatusBarEnabled = false;
                 settings.AreDevToolsEnabled = false;
                 settings.IsZoomControlEnabled = true;
-                WereadWeb.ZoomFactor = 1.0;
-                WereadWeb.CoreWebView2.NewWindowRequested += (_, e) =>
+                _wereadWeb.ZoomFactor = 1.0;
+                _wereadWeb.CoreWebView2.NewWindowRequested += (_, e) =>
                 {
                     e.Handled = true;
                     if (IsHttpOrHttps(e.Uri))
                         OpenExternalUrl(e.Uri);
                 };
-                WereadWeb.CoreWebView2.NavigationCompleted += (_, e) =>
+                _wereadWeb.CoreWebView2.NavigationCompleted += (_, e) =>
                 {
-                    if (_tab != TabMode.Read) return;
+                    if (_tab != TabMode.Read || _wereadWeb is null) return;
                     if (e.IsSuccess)
                     {
                         WereadHint.Visibility = Visibility.Collapsed;
-                        WereadWeb.Visibility = Visibility.Visible;
+                        _wereadWeb.Visibility = Visibility.Visible;
                     }
                     else
                     {
@@ -2638,15 +2648,15 @@ public partial class MainWindow : Window
                 _wereadWebReady = true;
             }
 
-            if (!_wereadNavigated && WereadWeb.CoreWebView2 != null)
+            if (!_wereadNavigated && _wereadWeb.CoreWebView2 != null)
             {
                 _wereadNavigated = true;
-                WereadWeb.CoreWebView2.Navigate(WereadHomeUrl);
+                _wereadWeb.CoreWebView2.Navigate(WereadHomeUrl);
             }
-            else if (WereadWeb.CoreWebView2 != null)
+            else if (_wereadWeb.CoreWebView2 != null)
             {
                 WereadHint.Visibility = Visibility.Collapsed;
-                WereadWeb.Visibility = Visibility.Visible;
+                _wereadWeb.Visibility = Visibility.Visible;
             }
         }
         catch (Exception ex)
@@ -3568,6 +3578,8 @@ public partial class MainWindow : Window
         Paint(TabAgentBorder, TabAgentText, _tab == TabMode.Agent);
         Paint(TabFileBorder, TabFileText, _tab == TabMode.File);
 
+        var leaveWeread = WereadPanel.Visibility == Visibility.Visible && _tab != TabMode.Read;
+
         NotePanel.Visibility = _tab == TabMode.Note ? Visibility.Visible : Visibility.Collapsed;
         TodoPanel.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         MailPanel.Visibility = _tab == TabMode.Mail ? Visibility.Visible : Visibility.Collapsed;
@@ -3579,7 +3591,29 @@ public partial class MainWindow : Window
         CalendarHost.Visibility = _tab == TabMode.Todo ? Visibility.Visible : Visibility.Collapsed;
         if (_tab != TabMode.Cyber)
             HideCyberNewsDetail();
+        if (leaveWeread)
+            UnloadWereadWeb();
         if (_expanded) PlaceExpanded();
+    }
+
+    /// <summary>离开读书页即销毁 WebView2 进程，登录目录仍保留，下次进页再懒加载。</summary>
+    private void UnloadWereadWeb()
+    {
+        if (_wereadWeb is not null)
+        {
+            try
+            {
+                WereadWebHost.Children.Remove(_wereadWeb);
+                _wereadWeb.Dispose();
+            }
+            catch { /* ignore */ }
+            _wereadWeb = null;
+        }
+
+        _wereadWebReady = false;
+        _wereadNavigated = false;
+        WereadHint.Text = "再次进入时加载微信读书。";
+        WereadHint.Visibility = Visibility.Visible;
     }
 
     // ----- 网安热点（独立页签：上列表点开即消失；下详情可原文/收藏） -----

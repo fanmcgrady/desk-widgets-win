@@ -322,6 +322,8 @@ public partial class StatsAppBarWindow : Window
                 : used >= 70 ? CursorBarOrange
                 : CursorBarBlue;
             StatsCursorBar.Width = track * (used / 100.0);
+            StatsCursor.ToolTip = string.IsNullOrWhiteSpace(usage.Message) ? null : usage.Message;
+            StatsCursorHint.ToolTip = StatsCursor.ToolTip;
             return;
         }
 
@@ -329,13 +331,17 @@ public partial class StatsAppBarWindow : Window
         StatsCursorBar.Background = CursorBarBlue;
         if (usage.State == CursorUsageState.Unavailable)
         {
-            StatsCursor.Text = "未登录";
-            StatsCursorHint.Text = "WSL agent login";
+            StatsCursor.Text = "—";
+            StatsCursorHint.Text = "未登录";
+            StatsCursor.ToolTip = "未读到 Cursor token（WSL auth.json 或 IDE 登录态）";
+            StatsCursorHint.ToolTip = StatsCursor.ToolTip;
         }
         else
         {
             StatsCursor.Text = "…";
             StatsCursorHint.Text = "读取中";
+            StatsCursor.ToolTip = null;
+            StatsCursorHint.ToolTip = null;
         }
     }
 

@@ -23,11 +23,11 @@ public sealed class AppConfig
 
     public static string ConfigPath => Path.Combine(ConfigDirectory, "config.json");
 
-    /// <summary>围栏根目录：项目/待办等分区所在位置（桌面上的「桌面分区」）。</summary>
+    /// <summary>旧版多分区根目录（桌面「桌面分区」），自动整理时仍排除该路径。</summary>
     public static string DefaultRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "桌面分区");
 
-    /// <summary>内存区默认映射到 X 盘根目录。</summary>
+    /// <summary>内存区（TMP）默认映射到 X 盘根目录。</summary>
     public static string DefaultMemoryRoot => @"X:\";
 
     public static AppConfig LoadOrCreate()
@@ -52,7 +52,6 @@ public sealed class AppConfig
 
     public static AppConfig CreateDefault()
     {
-        var root = DefaultRoot;
         return new AppConfig
         {
             DropMode = "move",
@@ -60,9 +59,7 @@ public sealed class AppConfig
             AutoSort = new AutoSortConfig(),
             Zones =
             [
-                new ZoneConfig { Id = "project", Name = "项目区", English = "PROJECT", Folder = Path.Combine(root, "项目区") },
-                new ZoneConfig { Id = "affairs", Name = "待办区", English = "TODO", Folder = Path.Combine(root, "待办区") },
-                new ZoneConfig { Id = "todo", Name = "内存", English = "MEMORY", Folder = DefaultMemoryRoot }
+                new ZoneConfig { Id = "todo", Name = "内存", English = "TMP", Folder = DefaultMemoryRoot }
             ]
         };
     }
@@ -73,10 +70,22 @@ public sealed class AppConfig
         AutoSort ??= new AutoSortConfig();
         if (string.IsNullOrWhiteSpace(AutoSort.TargetZoneId))
             AutoSort.TargetZoneId = "todo";
-        // 教学区已取消：左上角留给桌面图标
-        Zones.RemoveAll(z => z.Id == "teaching");
-        if (Zones.Count == 0)
+
+        // 只保留内存区，少挂 IShellView
+        Zones.RemoveAll(z => z.Id is not "todo");
+        var memory = Zones.FirstOrDefault(z => z.Id == "todo");
+        if (memory is null)
+        {
             Zones = CreateDefault().Zones;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(memory.Name))
+                memory.Name = "内存";
+            memory.English = "TMP";
+            if (string.IsNullOrWhiteSpace(memory.Folder))
+                memory.Folder = DefaultMemoryRoot;
+        }
     }
 
     public void Save()

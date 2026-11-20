@@ -58,8 +58,7 @@ public partial class MainWindow : Window
 
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
             {
-                foreach (var z in _zones.Values)
-                    z.Reload();
+                // 不预热三区 Shell；等鼠标移入或点击再懒创建
                 SyncZOrder();
             });
         };
@@ -167,30 +166,46 @@ public partial class MainWindow : Window
 
     public void SetPaused(bool paused)
     {
-        _paused = paused;
-        if (!HasHwnd && !paused)
+        if (_closing)
             return;
 
+        _paused = paused;
         if (paused)
         {
             _fencesShown = false;
             if (HasHwnd)
                 Visibility = Visibility.Hidden;
             _statsBar?.Pause();
-            // 不再装桌面双击 WH_MOUSE_LL；用托盘「显示围栏」或文件页设置恢复
+            return;
         }
-        else
+
+        // 恢复显示：Hidden 后再 Show，并等布局完成再打 Region（否则 Actual 为 0 会打成空区）
+        _fencesShown = true;
+        if (!IsVisible)
+            Show();
+        Visibility = Visibility.Visible;
+        EnsureStatsBar();
+        _statsBar?.Resume();
+        RestoreVisibleLayout();
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, RestoreVisibleLayout);
+    }
+
+    private void RestoreVisibleLayout()
+    {
+        if (_paused || _closing)
+            return;
+
+        UpdateLayout();
+        FitPrimaryScreen(force: true);
+        UpdateLayout();
+        LayoutZones();
+        RefreshRegion(force: true);
+        SyncZOrder(force: true);
+        foreach (var z in _zones.Values)
         {
-            _fencesShown = true;
-            Visibility = Visibility.Visible;
-            EnsureStatsBar();
-            _statsBar?.Resume();
-            FitPrimaryScreen(force: true);
-            RefreshRegion(force: true);
-            UpdateLayout();
-            SyncZOrder(force: true);
-            foreach (var z in _zones.Values)
-                z.Reload();
+            // Hidden 期间 HwndHost 可能已失效，重建 Shell 视图
+            z.DisposeService();
+            z.Reload();
         }
     }
 
@@ -316,10 +331,9 @@ public partial class MainWindow : Window
         if (_zoneRects.Count == 0)
             return "";
         var parts = new List<string>(_zoneRects.Count);
-        foreach (var id in new[] { "project", "affairs", "todo" })
+        foreach (var id in _zoneRects.Keys.OrderBy(x => x))
         {
-            if (!_zoneRects.TryGetValue(id, out var r))
-                continue;
+            var r = _zoneRects[id];
             parts.Add($"{id}:{r.X:0.#},{r.Y:0.#},{r.Width:0.#},{r.Height:0.#}");
         }
         return string.Join("|", parts);
@@ -335,18 +349,12 @@ public partial class MainWindow : Window
         _zoneRects.Clear();
         _lastRegionKey = "";
 
-        string[] order = ["project", "affairs", "todo"];
-        foreach (var id in order)
+        foreach (var cfg in _config.Zones)
         {
-            var cfg = _config.FindZone(id);
-            if (cfg is null)
-                continue;
-
             var view = new ZoneView();
             view.Bind(cfg, _config.DropMode);
-            view.HideRequested += (_, _) => DesktopBoxRuntime.SetPaused(true);
             RootGrid.Children.Add(view);
-            _zones[id] = view;
+            _zones[cfg.Id] = view;
         }
 
         LayoutZones();
@@ -360,7 +368,7 @@ public partial class MainWindow : Window
         var layout = _config.Layout;
         var w = ActualWidth;
         var h = ActualHeight;
-        // 左/右/顶贴边；底避开任务栏与底边状态 AppBar（WorkingArea 已含二者）
+        // 只占右下角，其余留给桌面图标
         var gx = w * layout.GutterX;
         var gy = h * layout.GutterY;
         var cx = w / 2;
@@ -375,13 +383,8 @@ public partial class MainWindow : Window
             bottomPad = Math.Max(0, (screen.Bounds.Bottom - screen.WorkingArea.Bottom) / dpiY);
         }
 
-        var topBottom = cy - gy;
         var lowTop = cy + gy;
         var lowBottom = h - bottomPad;
-
-        // 左上角留空给桌面图标；项目区占右上
-        Place("project", cx + gx, 0, w - (cx + gx), topBottom);
-        Place("affairs", 0, lowTop, cx - gx, lowBottom - lowTop);
         Place("todo", cx + gx, lowTop, w - (cx + gx), lowBottom - lowTop);
     }
 

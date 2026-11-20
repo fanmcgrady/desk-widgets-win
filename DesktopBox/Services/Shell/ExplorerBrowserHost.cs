@@ -783,6 +783,12 @@ internal sealed class ExplorerBrowserHost : HwndHost
             if (listView != IntPtr.Zero)
                 ZoneDragMoveForce.RegisterAlias(listView, this);
 
+            // 当前路径在下面赋值；拖放目标用闭包读 _currentPath
+            string DestFolder() => string.IsNullOrWhiteSpace(_currentPath) ? _rootPath : _currentPath;
+            ZoneDragMoveForce.InstallFolderDropTarget(_hwndView, DestFolder);
+            if (listView != IntPtr.Zero)
+                ZoneDragMoveForce.InstallFolderDropTarget(listView, DestFolder);
+
             var viewW = client.Right - client.Left;
             ApplyDetailsColumns(_shellView, viewW);
             ApplyColumnLayout(_hwndView, viewW);
@@ -796,7 +802,10 @@ internal sealed class ExplorerBrowserHost : HwndHost
                     ApplyColumnLayout(hwndView, ReadHostClientWidth());
                     var lv = FindDescendantByClass(hwndView, "SysListView32");
                     if (lv != IntPtr.Zero)
+                    {
                         ZoneDragMoveForce.RegisterAlias(lv, this);
+                        ZoneDragMoveForce.InstallFolderDropTarget(lv, DestFolder);
+                    }
                 }
             });
             _currentPath = Path.GetFullPath(folder);

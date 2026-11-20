@@ -24,14 +24,14 @@
           <TextBlock Text="Cursor" FontSize="9" Foreground="#FF999999"
                      VerticalAlignment="Center" Margin="0,0,4,0"/>
           <TextBlock x:Name="StatsCursor" Text="—" FontSize="11" FontWeight="SemiBold"
-                     Foreground="#FF333333" VerticalAlignment="Center" Width="32"
+                     Foreground="#FF333333" VerticalAlignment="Center" MinWidth="36"
                      TextAlignment="Left"/>
           <TextBlock x:Name="StatsCursorHint" Text="" FontSize="9"
                      Foreground="#FFAAAAAA" Margin="4,0,0,0"
                      VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                     Width="48"/>
+                     MinWidth="56" MaxWidth="88"/>
           <Border x:Name="StatsCursorTrack" Height="2" Background="#14000000"
-                  CornerRadius="1" Margin="5,0,0,0" Width="32" VerticalAlignment="Center">
+                  CornerRadius="1" Margin="5,0,0,0" Width="40" VerticalAlignment="Center">
             <Border x:Name="StatsCursorBar" Height="2" HorizontalAlignment="Left"
                     Background="#FF0078D4" CornerRadius="1" Width="0"/>
           </Border>

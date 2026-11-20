@@ -35,8 +35,9 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
         _loading = true;
         try
         {
-            ChkShowFences.IsChecked = !DesktopBoxRuntime.IsPaused;
-            StatusText.Text = DesktopBoxRuntime.IsPaused ? "围栏已隐藏" : "围栏已显示";
+            var shown = DesktopBoxRuntime.IsRunning && !DesktopBoxRuntime.IsPaused;
+            ChkShowFences.IsChecked = shown;
+            StatusText.Text = shown ? "围栏已显示" : "围栏未启动或已隐藏";
         }
         finally
         {
@@ -51,7 +52,7 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
         {
             var cfg = AppConfig.LoadOrCreate();
             ChkAutoSort.IsChecked = cfg.AutoSort?.Enabled ?? false;
-            ChkShowFences.IsChecked = !DesktopBoxRuntime.IsPaused;
+            ChkShowFences.IsChecked = DesktopBoxRuntime.IsRunning && !DesktopBoxRuntime.IsPaused;
             RadioMove.IsChecked = !string.Equals(cfg.DropMode, "copy", StringComparison.OrdinalIgnoreCase);
             RadioCopy.IsChecked = string.Equals(cfg.DropMode, "copy", StringComparison.OrdinalIgnoreCase);
 
@@ -247,10 +248,12 @@ public partial class FenceSettingsPanel : System.Windows.Controls.UserControl
 
     private void ChkShowFences_Changed(object sender, RoutedEventArgs e)
     {
-        if (_loading) return;
+        // InitializeComponent / ReloadFromDisk 期间不启停围栏
+        if (_loading || !IsLoaded) return;
         if (ChkShowFences.IsChecked == true && !DesktopBoxRuntime.IsRunning)
             DesktopBoxRuntime.TryStart(allowOnBattery: true);
-        DesktopBoxRuntime.SetPaused(ChkShowFences.IsChecked != true);
+        if (DesktopBoxRuntime.IsRunning)
+            DesktopBoxRuntime.SetPaused(ChkShowFences.IsChecked != true);
         StatusText.Text = ChkShowFences.IsChecked == true ? "围栏已显示" : "围栏已隐藏";
     }
 

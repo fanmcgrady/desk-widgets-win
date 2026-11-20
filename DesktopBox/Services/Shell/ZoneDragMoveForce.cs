@@ -7,7 +7,7 @@ namespace DesktopBox.Services.Shell;
 
 /// <summary>
 /// 子类化各区 Shell 视图：
-/// 1) 区间拖放默认移动（模拟 Shift）
+/// 1) 区间拖放：按配置强制复制(Ctrl)或移动(Shift)
 /// 2) 鼠标侧键后退/前进
 /// 3) 滚轮转到 SysListView32，保证上下滚动
 /// </summary>
@@ -33,7 +33,6 @@ internal static class ZoneDragMoveForce
     private const int VkShift = 0x10;
     private const int VkControl = 0x11;
     private const int VkLButton = 0x01;
-    private const uint KeyeventFKeyup = 0x0002;
 
     private static readonly ConcurrentDictionary<IntPtr, WeakReference<ExplorerBrowserHost>> Views = new();
     private static readonly SubclassProc SubclassCallback = OnSubclass;
@@ -41,7 +40,47 @@ internal static class ZoneDragMoveForce
 
     private static DispatcherTimer? _timer;
     private static bool _dragActive;
+    private static bool _pressStartedInView;
     private static bool _shiftForced;
+    private static bool _ctrlForced;
+    /// <summary>true=拖入强制复制；false=强制移动（默认）。</summary>
+    private static bool _preferCopy;
+    private static readonly ConcurrentDictionary<IntPtr, ForceEffectDropTarget> DropTargets = new();
+
+    /// <summary>供 ForceEffectDropTarget 读取当前拖放模式。</summary>
+    public static bool PreferCopy => _preferCopy;
+
+    public static void SetDropMode(string? mode)
+    {
+        _preferCopy = string.Equals(mode, "copy", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 拆掉窗口自带 IDropTarget，换成自管移动/复制。
+    /// DefView 与 SysListView32 都要挂（实际落点常在 ListView）。
+    /// </summary>
+    public static void InstallFolderDropTarget(IntPtr hwnd, Func<string> getDestFolder)
+    {
+        if (hwnd == IntPtr.Zero || getDestFolder is null)
+            return;
+
+        UninstallFolderDropTarget(hwnd);
+        _ = OleDropNative.RevokeDragDrop(hwnd);
+
+        var wrapper = new ForceEffectDropTarget(getDestFolder);
+        var hr = OleDropNative.RegisterDragDrop(hwnd, wrapper);
+        if (hr == 0)
+            DropTargets[hwnd] = wrapper;
+    }
+
+    public static void UninstallFolderDropTarget(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return;
+        if (!DropTargets.TryRemove(hwnd, out _))
+            return;
+        try { OleDropNative.RevokeDragDrop(hwnd); } catch { /* ignore */ }
+    }
 
     /// <summary>
     /// 登记 DefView：只加入命中表并子类化以收 LVN 拖放通知（区间默认移动）。
@@ -54,6 +93,7 @@ internal static class ZoneDragMoveForce
 
         Views[hwndView] = new WeakReference<ExplorerBrowserHost>(host);
         SetWindowSubclass(hwndView, SubclassCallback, SubclassId, IntPtr.Zero);
+        EnsureWatchTimer();
     }
 
     /// <summary>
@@ -66,6 +106,7 @@ internal static class ZoneDragMoveForce
         Views[hwnd] = new WeakReference<ExplorerBrowserHost>(host);
         if (IsClass(hwnd, "SysListView32"))
             SetWindowSubclass(hwnd, SubclassCallback, SubclassId, IntPtr.Zero);
+        EnsureWatchTimer();
     }
 
     public static void UnregisterView(IntPtr hwndView)
@@ -73,19 +114,21 @@ internal static class ZoneDragMoveForce
         if (hwndView == IntPtr.Zero)
             return;
 
-        // 清掉指向同一 host 的别名，并拆子类化
+        // 清掉指向同一 host 的别名、拖放目标与子类化
         if (Views.TryGetValue(hwndView, out var weak) && weak.TryGetTarget(out var host))
         {
             foreach (var key in Views.Keys.ToArray())
             {
                 if (Views.TryGetValue(key, out var w) && w.TryGetTarget(out var h) && ReferenceEquals(h, host))
                 {
+                    UninstallFolderDropTarget(key);
                     RemoveWindowSubclass(key, SubclassCallback, SubclassId);
                     Views.TryRemove(key, out _);
                 }
             }
         }
 
+        UninstallFolderDropTarget(hwndView);
         RemoveWindowSubclass(hwndView, SubclassCallback, SubclassId);
         Views.TryRemove(hwndView, out _);
     }
@@ -102,7 +145,9 @@ internal static class ZoneDragMoveForce
         ShellWheelHook.Uninstall();
         _dragActive = false;
         StopTimer();
-        ReleaseForcedShift();
+        ReleaseForcedModifiers();
+        foreach (var hwnd in DropTargets.Keys.ToArray())
+            UninstallFolderDropTarget(hwnd);
         foreach (var hwnd in Views.Keys)
             RemoveWindowSubclass(hwnd, SubclassCallback, SubclassId);
         Views.Clear();
@@ -206,6 +251,7 @@ internal static class ZoneDragMoveForce
     {
         if (msg is WmLButtonDown or WmRButtonDown)
         {
+            _pressStartedInView = true;
             if (TryGetHost(hwnd, out var host))
                 host.ActivateForInput();
         }
@@ -302,10 +348,11 @@ internal static class ZoneDragMoveForce
     private static void BeginDragWatch()
     {
         _dragActive = true;
-        EnsureTimer();
+        EnsureWatchTimer();
     }
 
-    private static void EnsureTimer()
+    /// <summary>常驻轻量轮询：覆盖「从外部拖进分区」（无 LVN_BEGINDRAG）。</summary>
+    private static void EnsureWatchTimer()
     {
         if (_timer is not null)
             return;
@@ -332,9 +379,11 @@ internal static class ZoneDragMoveForce
 
     private static void Tick()
     {
-        if (!_dragActive)
+        if (Views.IsEmpty)
         {
-            ReleaseForcedShift();
+            ReleaseForcedModifiers();
+            _dragActive = false;
+            _pressStartedInView = false;
             StopTimer();
             return;
         }
@@ -343,34 +392,65 @@ internal static class ZoneDragMoveForce
         if (!lButtonDown)
         {
             _dragActive = false;
-            ReleaseForcedShift();
-            StopTimer();
-            return;
-        }
-
-        if ((GetAsyncKeyState(VkControl) & 0x8000) != 0)
-        {
-            ReleaseForcedShift();
+            _pressStartedInView = false;
+            ReleaseForcedModifiers();
             return;
         }
 
         if (!GetCursorPos(out var pt) || !IsOverRegisteredView(pt))
         {
-            ReleaseForcedShift();
+            ReleaseForcedModifiers();
             return;
         }
 
-        EnsureShiftDown();
+        // 区内按下起的普通点选/框选不强制；区内起拖或外部拖入才强制
+        var externalDrop = !_pressStartedInView;
+        if (!_dragActive && !externalDrop)
+        {
+            ReleaseForcedModifiers();
+            return;
+        }
+
+        if (_preferCopy)
+        {
+            // 用户按住 Shift 时仍允许移动
+            if ((GetAsyncKeyState(VkShift) & 0x8000) != 0 && !_shiftForced)
+            {
+                ReleaseForcedCtrl();
+                return;
+            }
+
+            ReleaseForcedShift();
+            EnsureCtrlDown();
+        }
+        else
+        {
+            // 用户按住 Ctrl 时仍允许复制（排除我们自己按下的 Ctrl）
+            if ((GetAsyncKeyState(VkControl) & 0x8000) != 0 && !_ctrlForced)
+            {
+                ReleaseForcedShift();
+                return;
+            }
+
+            ReleaseForcedCtrl();
+            EnsureShiftDown();
+        }
     }
 
     private static bool IsOverRegisteredView(Point pt)
     {
-        var hwnd = WindowFromPoint(pt);
-        while (hwnd != IntPtr.Zero)
+        // 拖放时 WindowFromPoint 常落在拖影窗（别的进程），父链命不中；改按分区矩形判断
+        foreach (var kv in Views)
         {
-            if (Views.ContainsKey(hwnd))
+            if (!IsWindow(kv.Key))
+            {
+                Views.TryRemove(kv.Key, out _);
+                continue;
+            }
+            if (!GetWindowRect(kv.Key, out var rc))
+                continue;
+            if (pt.X >= rc.Left && pt.X < rc.Right && pt.Y >= rc.Top && pt.Y < rc.Bottom)
                 return true;
-            hwnd = GetParent(hwnd);
         }
 
         return false;
@@ -380,16 +460,55 @@ internal static class ZoneDragMoveForce
     {
         if (_shiftForced)
             return;
-        keybd_event((byte)VkShift, 0, 0, UIntPtr.Zero);
+        SendKey(VkShift, keyUp: false);
         _shiftForced = true;
+    }
+
+    private static void EnsureCtrlDown()
+    {
+        if (_ctrlForced)
+            return;
+        SendKey(VkControl, keyUp: false);
+        _ctrlForced = true;
     }
 
     private static void ReleaseForcedShift()
     {
         if (!_shiftForced)
             return;
-        keybd_event((byte)VkShift, 0, KeyeventFKeyup, UIntPtr.Zero);
+        SendKey(VkShift, keyUp: true);
         _shiftForced = false;
+    }
+
+    private static void ReleaseForcedCtrl()
+    {
+        if (!_ctrlForced)
+            return;
+        SendKey(VkControl, keyUp: true);
+        _ctrlForced = false;
+    }
+
+    private static void ReleaseForcedModifiers()
+    {
+        ReleaseForcedShift();
+        ReleaseForcedCtrl();
+    }
+
+    private static void SendKey(int vk, bool keyUp)
+    {
+        var input = new Input
+        {
+            Type = 1, // INPUT_KEYBOARD
+            U = new InputUnion
+            {
+                Ki = new KeybdInput
+                {
+                    WVk = (ushort)vk,
+                    DwFlags = keyUp ? 0x0002u : 0u // KEYEVENTF_KEYUP
+                }
+            }
+        };
+        _ = SendInput(1, [input], Marshal.SizeOf<Input>());
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -428,8 +547,31 @@ internal static class ZoneDragMoveForce
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
-    [DllImport("user32.dll")]
-    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, Input[] pInputs, int cbSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input
+    {
+        public uint Type;
+        public InputUnion U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)] public KeybdInput Ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeybdInput
+    {
+        public ushort WVk;
+        public ushort WScan;
+        public uint DwFlags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);

@@ -21,7 +21,7 @@ public static class DesktopBoxRuntime
 
     public static event Action? PauseChanged;
 
-    /// <param name="allowOnBattery">true：托盘/设置手动开启，电池下也允许；默认启动则电池下跳过。</param>
+    /// <param name="allowOnBattery">手动开启时传 true，电池下也允许拉起。</param>
     public static bool TryStart(bool allowOnBattery = false)
     {
         // 窗口已被关掉但标志未清时，允许重新拉起
@@ -30,6 +30,7 @@ public static class DesktopBoxRuntime
         if (_started && (_main is null || !_main.IsLoaded))
             CleanupAfterClose();
 
+        // 工作区启动不再自动调 TryStart；此处仅挡「误调」：电池且非手动
         if (!allowOnBattery && PowerBudget.OnBattery)
         {
             try
@@ -86,6 +87,7 @@ public static class DesktopBoxRuntime
 
         var config = AppConfig.LoadOrCreate();
         config.EnsureFolders();
+        ZoneDragMoveForce.SetDropMode(config.DropMode);
 
         _main = new MainWindow(config);
         _main.Closed += OnMainClosed;
@@ -166,6 +168,7 @@ public static class DesktopBoxRuntime
         config.Normalize();
         config.EnsureFolders();
         config.Save();
+        ZoneDragMoveForce.SetDropMode(config.DropMode);
 
         _autoSort?.Dispose();
         _autoSort = new DesktopAutoSortService(config);

@@ -29,6 +29,7 @@
                       Checked="ChkAutoSort_Changed" Unchecked="ChkAutoSort_Changed"/>
             <CheckBox x:Name="ChkShowFences" Content="显示围栏" FontSize="11"
                       Margin="0,0,12,4" VerticalAlignment="Center" IsChecked="True"
+                      ToolTip="默认开启；取消勾选可隐藏以省内存。电池下启动时仍会跳过，可手动勾选强制打开"
                       Checked="ChkShowFences_Changed" Unchecked="ChkShowFences_Changed"/>
           </WrapPanel>
           <DockPanel Margin="0,0,0,6" LastChildFill="False">

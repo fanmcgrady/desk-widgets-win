@@ -10,15 +10,18 @@ namespace DesktopBox.Services;
 
 /// <summary>
 /// 读取本机 Cursor 登录态，向 Dashboard 拉当前周期用量。
-/// 优先 WSL ~/.config/cursor/auth.json（agent 登录）；否则尝试解密 IDE state.vscdb。
+/// 优先 WSL ~/.config/cursor/auth.json（限时）；否则解密 IDE state.vscdb。
 /// </summary>
 internal static class CursorUsageService
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(12) };
+    private static readonly HttpClient Http = CreateHttp();
     private static readonly object Gate = new();
     private static CursorUsageInfo _cached = CursorUsageInfo.Unknown;
     private static DateTime _nextFetchUtc = DateTime.MinValue;
     private static int _busy;
+
+    /// <summary>后台拉取结束后触发（任意线程）。</summary>
+    public static event Action? Updated;
 
     public static CursorUsageInfo Cached
     {
@@ -43,7 +46,10 @@ internal static class CursorUsageService
                     lock (Gate)
                     {
                         _cached = info;
-                        _nextFetchUtc = DateTime.UtcNow + RefreshInterval;
+                        _nextFetchUtc = DateTime.UtcNow + (
+                            info.State == CursorUsageState.Ok
+                                ? RefreshIntervalOk
+                                : RefreshIntervalFail);
                     }
                 }
                 catch
@@ -52,12 +58,13 @@ internal static class CursorUsageService
                     {
                         if (_cached.State == CursorUsageState.Unknown)
                             _cached = CursorUsageInfo.Unavailable;
-                        _nextFetchUtc = DateTime.UtcNow + TimeSpan.FromMinutes(2);
+                        _nextFetchUtc = DateTime.UtcNow + RefreshIntervalFail;
                     }
                 }
                 finally
                 {
                     Interlocked.Exchange(ref _busy, 0);
+                    try { Updated?.Invoke(); } catch { /* ignore */ }
                 }
             });
         }
@@ -65,7 +72,15 @@ internal static class CursorUsageService
         lock (Gate) return _cached;
     }
 
-    private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan RefreshIntervalOk = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan RefreshIntervalFail = TimeSpan.FromMinutes(1);
+
+    private static HttpClient CreateHttp()
+    {
+        var c = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
+        c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "DeskWidgets/1.0");
+        return c;
+    }
 
     private static async Task<CursorUsageInfo> FetchAsync()
     {
@@ -92,10 +107,26 @@ internal static class CursorUsageService
         double pct = -1;
         if (plan.ValueKind == JsonValueKind.Object)
         {
-            if (plan.TryGetProperty("totalPercentUsed", out var tp) && tp.TryGetDouble(out var v))
+            if (TryReadDouble(plan, "totalPercentUsed", out var v))
                 pct = v;
-            else if (plan.TryGetProperty("apiPercentUsed", out var ap) && ap.TryGetDouble(out var v2))
+            else if (TryReadDouble(plan, "autoPercentUsed", out var v2))
                 pct = v2;
+            else if (TryReadDouble(plan, "apiPercentUsed", out var v3))
+                pct = v3;
+        }
+
+        // 无百分比时从 displayMessage 里抠 "23%"
+        if (pct < 0 && !string.IsNullOrWhiteSpace(msg))
+        {
+            var i = msg.IndexOf('%');
+            if (i > 0)
+            {
+                var s = i - 1;
+                while (s >= 0 && (char.IsDigit(msg[s]) || msg[s] == '.'))
+                    s--;
+                if (double.TryParse(msg[(s + 1)..i], out var fromMsg))
+                    pct = fromMsg;
+            }
         }
 
         string? resetHint = null;
@@ -116,6 +147,18 @@ internal static class CursorUsageService
         return new CursorUsageInfo(CursorUsageState.Ok, pct, msg, resetHint);
     }
 
+    private static bool TryReadDouble(JsonElement obj, string name, out double value)
+    {
+        value = 0;
+        if (!obj.TryGetProperty(name, out var el))
+            return false;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out value))
+            return true;
+        if (el.ValueKind == JsonValueKind.String && double.TryParse(el.GetString(), out value))
+            return true;
+        return false;
+    }
+
     private static long? ParseEpochMs(JsonElement el)
     {
         if (el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out var n))
@@ -127,12 +170,10 @@ internal static class CursorUsageService
 
     private static async Task<string?> ResolveAccessTokenAsync()
     {
-        // 1) WSL agent 登录（明文 JWT）
         var wsl = await TryReadWslAuthTokenAsync().ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(wsl))
             return wsl;
 
-        // 2) IDE state.vscdb（可能是 safe-storage 密文）
         return TryReadIdeAccessToken();
     }
 
@@ -140,6 +181,16 @@ internal static class CursorUsageService
     {
         try
         {
+            // 先走 UNC，避免 wsl.exe 冷启动卡住
+            var unc = TryFindWslAuthJsonUnc();
+            if (unc is not null)
+            {
+                var text = await File.ReadAllTextAsync(unc).ConfigureAwait(false);
+                var token = ParseAccessToken(text);
+                if (!string.IsNullOrWhiteSpace(token))
+                    return token;
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = "wsl.exe",
@@ -156,22 +207,86 @@ internal static class CursorUsageService
 
             using var proc = Process.Start(psi);
             if (proc is null) return null;
-            var stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
+
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var exited = await WaitForExitAsync(proc, TimeSpan.FromSeconds(4)).ConfigureAwait(false);
+            if (!exited)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                return null;
+            }
+
+            var stdout = await stdoutTask.ConfigureAwait(false);
             if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
                 return null;
 
-            using var doc = JsonDocument.Parse(stdout);
-            if (doc.RootElement.TryGetProperty("accessToken", out var t))
+            return ParseAccessToken(stdout);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryFindWslAuthJsonUnc()
+    {
+        foreach (var root in new[] { @"\\wsl.localhost", @"\\wsl$" })
+        {
+            try
             {
-                var token = t.GetString();
-                if (!string.IsNullOrWhiteSpace(token) && token.Contains('.'))
-                    return token;
+                if (!Directory.Exists(root))
+                    continue;
+                foreach (var distro in Directory.EnumerateDirectories(root))
+                {
+                    try
+                    {
+                        var homeRoot = Path.Combine(distro, "home");
+                        if (!Directory.Exists(homeRoot))
+                            continue;
+                        foreach (var userDir in Directory.EnumerateDirectories(homeRoot))
+                        {
+                            var auth = Path.Combine(userDir, ".config", "cursor", "auth.json");
+                            if (File.Exists(auth))
+                                return auth;
+                        }
+                    }
+                    catch { /* 单个发行版不可读则跳过 */ }
+                }
             }
+            catch { /* ignore */ }
+        }
+
+        return null;
+    }
+
+    private static string? ParseAccessToken(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("accessToken", out var t))
+                return null;
+            var token = t.GetString();
+            if (!string.IsNullOrWhiteSpace(token) && token.Contains('.'))
+                return token;
         }
         catch { /* ignore */ }
 
         return null;
+    }
+
+    private static async Task<bool> WaitForExitAsync(Process proc, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     private static string? TryReadIdeAccessToken()
@@ -183,10 +298,6 @@ internal static class CursorUsageService
                 "Cursor", "User", "globalStorage", "state.vscdb");
             if (!File.Exists(db))
                 return null;
-
-            // 只读打开；Microsoft.Data.Sqlite 未引用时用 sqlite3 进程不稳，改 ADO 可选。
-            // 这里用轻量：System.Data.SQLite 没有，直接读文件不现实。用 Process sqlite3 或手动解析。
-            // DesktopBox 无额外依赖：调 powershell/python 太重。改用 Microsoft.Data.Sqlite 包。
             return ReadTokenFromVscdb(db);
         }
         catch
@@ -197,11 +308,10 @@ internal static class CursorUsageService
 
     private static string? ReadTokenFromVscdb(string dbPath)
     {
-        // 无 SQLite 包时：用 Windows 自带 python 或跳过。为稳健加 Microsoft.Data.Sqlite。
-        // 先尝试：若明文/密文都能解则返回。
         try
         {
-            using var con = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            using var con = new Microsoft.Data.Sqlite.SqliteConnection(
+                $"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
             con.Open();
             using var cmd = con.CreateCommand();
             cmd.CommandText = "SELECT value FROM ItemTable WHERE key=$k LIMIT 1";
@@ -210,7 +320,7 @@ internal static class CursorUsageService
             if (string.IsNullOrWhiteSpace(raw))
                 return null;
             if (raw.Contains('.'))
-                return raw; // 旧明文 JWT
+                return raw;
             if (raw.StartsWith("cursor-safe-storage:v1:", StringComparison.Ordinal))
                 return DecryptSafeStorage(raw);
         }
@@ -253,27 +363,38 @@ internal static class CursorUsageService
 
     private static byte[]? LoadOsCryptKey()
     {
-        try
+        foreach (var localState in CandidateLocalStatePaths())
         {
-            var localState = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Cursor", "Local State");
-            if (!File.Exists(localState))
-                return null;
-            using var doc = JsonDocument.Parse(File.ReadAllText(localState));
-            if (!doc.RootElement.TryGetProperty("os_crypt", out var oc)
-                || !oc.TryGetProperty("encrypted_key", out var ek))
-                return null;
-            var raw = Convert.FromBase64String(ek.GetString() ?? "");
-            // prefix "DPAPI"
-            if (raw.Length < 6 || Encoding.ASCII.GetString(raw, 0, 5) != "DPAPI")
-                return null;
-            return ProtectedData.Unprotect(raw.AsSpan(5).ToArray(), null, DataProtectionScope.CurrentUser);
+            try
+            {
+                if (!File.Exists(localState))
+                    continue;
+                using var doc = JsonDocument.Parse(File.ReadAllText(localState));
+                if (!doc.RootElement.TryGetProperty("os_crypt", out var oc)
+                    || !oc.TryGetProperty("encrypted_key", out var ek))
+                    continue;
+                var raw = Convert.FromBase64String(ek.GetString() ?? "");
+                if (raw.Length < 6 || Encoding.ASCII.GetString(raw, 0, 5) != "DPAPI")
+                    continue;
+                return ProtectedData.Unprotect(raw.AsSpan(5).ToArray(), null, DataProtectionScope.CurrentUser);
+            }
+            catch
+            {
+                // 试下一个路径
+            }
         }
-        catch
-        {
-            return null;
-        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> CandidateLocalStatePaths()
+    {
+        yield return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Cursor", "Local State");
+        yield return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Cursor", "Local State");
     }
 }
 

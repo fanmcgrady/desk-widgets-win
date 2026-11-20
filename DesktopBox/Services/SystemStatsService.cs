@@ -30,6 +30,8 @@ internal sealed class SystemStatsService : IDisposable
         _started = true;
         _tick = 0;
         _timer.Interval = PowerBudget.StatsInterval;
+        CursorUsageService.Updated -= OnCursorUsageUpdated;
+        CursorUsageService.Updated += OnCursorUsageUpdated;
         _ = CursorUsageService.PeekAndRefresh();
         _timer.Start();
         Tick();
@@ -39,12 +41,23 @@ internal sealed class SystemStatsService : IDisposable
     {
         _timer.Stop();
         _started = false;
+        CursorUsageService.Updated -= OnCursorUsageUpdated;
     }
 
     public void Dispose()
     {
         Stop();
         Sampled = null;
+    }
+
+    private void OnCursorUsageUpdated()
+    {
+        // 拉取完成立刻刷底栏，不必等 10 秒 Tick
+        var dispatcher = _timer.Dispatcher;
+        if (dispatcher.CheckAccess())
+            Tick();
+        else
+            dispatcher.BeginInvoke(Tick);
     }
 
     private void Tick()

@@ -771,13 +771,11 @@
           </DockPanel>
           <Border Background="White" CornerRadius="8"
                   BorderBrush="#10000000" BorderThickness="1" ClipToBounds="True">
-            <Grid>
+            <Grid x:Name="WereadWebHost">
               <TextBlock x:Name="WereadHint" Text="首次打开需微信扫码登录，登录态会保留在本机。"
                          Foreground="{StaticResource Muted}" FontSize="12"
                          HorizontalAlignment="Center" VerticalAlignment="Center"
                          TextWrapping="Wrap" Margin="24" TextAlignment="Center"/>
-              <wv2:WebView2 x:Name="WereadWeb" Visibility="Collapsed"
-                            DefaultBackgroundColor="#FFFFFFFF"/>
             </Grid>
           </Border>
         </DockPanel>
