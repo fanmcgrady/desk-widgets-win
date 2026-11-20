@@ -3,12 +3,11 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              Background="Transparent"
              PreviewMouseLeftButtonDown="OnPreviewMouseLeftButtonDown">
-  <!-- TMP 暖色底：偏临时草稿区，和桌面白底区分开 -->
   <Border x:Name="Frame"
           CornerRadius="0"
           BorderThickness="1"
-          BorderBrush="#66C9A06A"
-          Background="#FFF3E8"
+          BorderBrush="#40B0B0B0"
+          Background="White"
           ClipToBounds="True"
           SnapsToDevicePixels="True"
           UseLayoutRounding="True">
@@ -20,16 +19,16 @@
 
       <Border x:Name="TitleBar"
               Grid.Row="0"
-              Background="#FFE8D5"
-              BorderBrush="#33A07040"
+              Background="White"
+              BorderBrush="#14000000"
               BorderThickness="0,0,0,1"
               Padding="8,3,8,2"
               MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
         <TextBlock x:Name="TitleText"
                    FontSize="13"
                    FontWeight="Normal"
-                   FontFamily="Consolas, Microsoft YaHei"
-                   Foreground="#FF6B5344"
+                   FontFamily="Microsoft YaHei"
+                   Foreground="#FF5C5C5C"
                    TextAlignment="Left"
                    TextTrimming="CharacterEllipsis" />
       </Border>
@@ -37,7 +36,7 @@
       <Grid x:Name="ShellHostContainer"
             Grid.Row="1"
             Margin="0"
-            Background="#FFF7EEE4" />
+            Background="White" />
     </Grid>
   </Border>
 </UserControl>

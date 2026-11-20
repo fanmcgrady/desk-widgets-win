@@ -11,8 +11,8 @@ namespace DesktopBox;
 
 public partial class ZoneView : System.Windows.Controls.UserControl
 {
-    private static readonly SolidColorBrush TitleEnglishBrush = CreateFrozenBrush(0xA0, 0x7A, 0x58);
-    private static readonly SolidColorBrush TitlePathBrush = CreateFrozenBrush(0x8C, 0x6E, 0x52);
+    private static readonly SolidColorBrush TitleEnglishBrush = CreateFrozenBrush(0x99, 0x99, 0x99);
+    private static readonly SolidColorBrush TitlePathBrush = CreateFrozenBrush(0x88, 0x88, 0x88);
 
     private ZoneConfig? _zone;
     private string _dropMode = "move";
