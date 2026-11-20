@@ -242,20 +242,20 @@
             </Border>
           </StackPanel>
         </Border>
-        <Border x:Name="TabWereadBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
-                MouseLeftButtonUp="TabWeread_Click" Padding="0,0,0,6" ToolTip="微信读书 · Ctrl+7">
-          <TextBlock x:Name="TabWereadText" Text="读书" FontSize="13" Foreground="{StaticResource Muted}"/>
-        </Border>
         <Border x:Name="TabAgentBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
                 Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
                 MouseLeftButtonUp="TabAgent_Click" Padding="0,0,0,6" ToolTip="大模型 · Ctrl+5 · Ctrl+空格">
           <TextBlock x:Name="TabAgentText" Text="模型" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
         <Border x:Name="TabFileBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
-                Cursor="Hand" Background="Transparent"
+                Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
                 MouseLeftButtonUp="TabFile_Click" Padding="0,0,0,6" ToolTip="文件搜索 / 桌面分区 · Ctrl+6 · Alt+空格">
           <TextBlock x:Name="TabFileText" Text="文件" FontSize="13" Foreground="{StaticResource Muted}"/>
+        </Border>
+        <Border x:Name="TabWereadBorder" BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                Cursor="Hand" Background="Transparent"
+                MouseLeftButtonUp="TabWeread_Click" Padding="0,0,0,6" ToolTip="微信读书 · Ctrl+7">
+          <TextBlock x:Name="TabWereadText" Text="读书" FontSize="13" Foreground="{StaticResource Muted}"/>
         </Border>
       </StackPanel>
 
