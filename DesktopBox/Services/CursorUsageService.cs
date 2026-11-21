@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -10,15 +11,18 @@ namespace DesktopBox.Services;
 
 /// <summary>
 /// 读取本机 Cursor 登录态，向 Dashboard 拉当前周期用量。
-/// 优先 WSL ~/.config/cursor/auth.json（限时）；否则解密 IDE state.vscdb。
+/// 优先解密 IDE state.vscdb；其次 WSL auth.json。HttpClient 失败时回退 curl。
 /// </summary>
 internal static class CursorUsageService
 {
     private static readonly HttpClient Http = CreateHttp();
     private static readonly object Gate = new();
-    private static CursorUsageInfo _cached = CursorUsageInfo.Unknown;
+    private static CursorUsageInfo _cached = LoadDiskCache();
     private static DateTime _nextFetchUtc = DateTime.MinValue;
     private static int _busy;
+
+    private static string CachePath =>
+        Path.Combine(AppConfig.ConfigDirectory, "cursor-usage.json");
 
     /// <summary>后台拉取结束后触发（任意线程）。</summary>
     public static event Action? Updated;
@@ -45,7 +49,12 @@ internal static class CursorUsageService
                     var info = await FetchAsync().ConfigureAwait(false);
                     lock (Gate)
                     {
-                        _cached = info;
+                        // 失败时保留上一次成功值，避免底栏空白
+                        if (info.State == CursorUsageState.Ok
+                            || _cached.State != CursorUsageState.Ok)
+                            _cached = info;
+                        if (info.State == CursorUsageState.Ok)
+                            SaveDiskCache(info);
                         _nextFetchUtc = DateTime.UtcNow + (
                             info.State == CursorUsageState.Ok
                                 ? RefreshIntervalOk
@@ -77,29 +86,130 @@ internal static class CursorUsageService
 
     private static HttpClient CreateHttp()
     {
-        var c = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
+        // 本机 curl 正常、HttpClient 易超时：多半是代理自动探测 / HTTP2
+        var handler = new SocketsHttpHandler
+        {
+            UseProxy = false,
+            ConnectTimeout = TimeSpan.FromSeconds(8),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            AutomaticDecompression = DecompressionMethods.All,
+        };
+        var c = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+            DefaultRequestVersion = HttpVersion.Version11,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
         c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "DeskWidgets/1.0");
         return c;
     }
 
     private static async Task<CursorUsageInfo> FetchAsync()
     {
-        var token = await ResolveAccessTokenAsync().ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(token))
-            return CursorUsageInfo.Unavailable;
+        foreach (var token in await EnumerateAccessTokensAsync().ConfigureAwait(false))
+        {
+            var body = await FetchUsageJsonAsync(token).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+                return ParseUsageJson(body);
+        }
 
-        using var req = new HttpRequestMessage(
-            HttpMethod.Post,
-            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage");
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        req.Headers.TryAddWithoutValidation("Connect-Protocol-Version", "1");
-        req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+        return CursorUsageInfo.Unavailable;
+    }
 
-        using var resp = await Http.SendAsync(req).ConfigureAwait(false);
-        var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-            return CursorUsageInfo.Unavailable;
+    private static async Task<List<string>> EnumerateAccessTokensAsync()
+    {
+        var list = new List<string>();
+        void Add(string? t)
+        {
+            if (string.IsNullOrWhiteSpace(t)) return;
+            if (list.Any(x => string.Equals(x, t, StringComparison.Ordinal))) return;
+            list.Add(t);
+        }
 
+        Add(TryReadIdeAccessToken());
+        Add(await TryReadWslAuthTokenAsync().ConfigureAwait(false));
+        return list;
+    }
+
+    private static async Task<string?> FetchUsageJsonAsync(string token)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage");
+            req.Version = HttpVersion.Version11;
+            req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Headers.TryAddWithoutValidation("Connect-Protocol-Version", "1");
+            req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+
+            using var resp = await Http.SendAsync(req).ConfigureAwait(false);
+            var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (resp.IsSuccessStatusCode && !string.IsNullOrWhiteSpace(body))
+                return body;
+        }
+        catch
+        {
+            // 回退 curl
+        }
+
+        return await FetchUsageJsonViaCurlAsync(token).ConfigureAwait(false);
+    }
+
+    private static async Task<string?> FetchUsageJsonViaCurlAsync(string token)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "curl.exe",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+            };
+            psi.ArgumentList.Add("-sS");
+            psi.ArgumentList.Add("-m");
+            psi.ArgumentList.Add("15");
+            psi.ArgumentList.Add("-X");
+            psi.ArgumentList.Add("POST");
+            psi.ArgumentList.Add("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage");
+            psi.ArgumentList.Add("-H");
+            psi.ArgumentList.Add($"Authorization: Bearer {token}");
+            psi.ArgumentList.Add("-H");
+            psi.ArgumentList.Add("Connect-Protocol-Version: 1");
+            psi.ArgumentList.Add("-H");
+            psi.ArgumentList.Add("Content-Type: application/json");
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add("{}");
+
+            using var proc = Process.Start(psi);
+            if (proc is null) return null;
+            var stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(18));
+            try { await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                return null;
+            }
+
+            if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
+                return null;
+            if (stdout.TrimStart().StartsWith('<'))
+                return null;
+            return stdout;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static CursorUsageInfo ParseUsageJson(string body)
+    {
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
         var plan = root.TryGetProperty("planUsage", out var p) ? p : default;
@@ -115,7 +225,6 @@ internal static class CursorUsageService
                 pct = v3;
         }
 
-        // 无百分比时从 displayMessage 里抠 "23%"
         if (pct < 0 && !string.IsNullOrWhiteSpace(msg))
         {
             var i = msg.IndexOf('%');
@@ -147,6 +256,46 @@ internal static class CursorUsageService
         return new CursorUsageInfo(CursorUsageState.Ok, pct, msg, resetHint);
     }
 
+    private static CursorUsageInfo LoadDiskCache()
+    {
+        try
+        {
+            if (!File.Exists(CachePath))
+                return CursorUsageInfo.Unknown;
+            using var doc = JsonDocument.Parse(File.ReadAllText(CachePath));
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("percentUsed", out var p) || !p.TryGetDouble(out var pct))
+                return CursorUsageInfo.Unknown;
+            var msg = root.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
+            var hint = root.TryGetProperty("resetHint", out var h) ? h.GetString() : null;
+            return new CursorUsageInfo(CursorUsageState.Ok, pct, msg, hint);
+        }
+        catch
+        {
+            return CursorUsageInfo.Unknown;
+        }
+    }
+
+    private static void SaveDiskCache(CursorUsageInfo info)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppConfig.ConfigDirectory);
+            var json = JsonSerializer.Serialize(new
+            {
+                percentUsed = info.PercentUsed,
+                message = info.Message,
+                resetHint = info.ResetHint,
+                savedAt = DateTime.UtcNow,
+            });
+            File.WriteAllText(CachePath, json);
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
     private static bool TryReadDouble(JsonElement obj, string name, out double value)
     {
         value = 0;
@@ -166,15 +315,6 @@ internal static class CursorUsageService
         if (el.ValueKind == JsonValueKind.String && long.TryParse(el.GetString(), out var s))
             return s;
         return null;
-    }
-
-    private static async Task<string?> ResolveAccessTokenAsync()
-    {
-        var wsl = await TryReadWslAuthTokenAsync().ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(wsl))
-            return wsl;
-
-        return TryReadIdeAccessToken();
     }
 
     private static async Task<string?> TryReadWslAuthTokenAsync()

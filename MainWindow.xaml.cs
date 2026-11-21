@@ -146,6 +146,7 @@ public partial class MainWindow : Window
     private const uint VkUp = 0x26;
     private const uint VkRight = 0x27;
     private const uint VkDown = 0x28;
+    private const uint VkD = 0x44;
     private const uint GaRoot = 2;
     /// <summary>单次 Ctrl 轻点最长按住时间。</summary>
     private static readonly TimeSpan EscTapMaxHold = TimeSpan.FromMilliseconds(400);
@@ -1030,6 +1031,20 @@ public partial class MainWindow : Window
             }
         }
 
+        // 邮件阅读：Ctrl+D 标记垃圾（正文 WebView2 获焦时 PreviewKeyDown 收不到）
+        if (ctrlDown && !altDown && !shiftDown
+            && vk == VkD
+            && _tab == TabMode.Mail
+            && _mailView == MailView.Read)
+        {
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                if (_tab == TabMode.Mail && _mailView == MailView.Read)
+                    BtnMailJunk_Click(this, new RoutedEventArgs());
+            }, DispatcherPriority.Send);
+            return true;
+        }
+
         // Ctrl+1..7：优先 RegisterHotKey（展开且前台）；未注册时钩子兜底。小键盘热键未登记，仍走钩子。
         if (!ctrlDown || altDown || shiftDown) return false;
         var numpad = vk is 0x61 or 0x62 or 0x63 or 0x64 or 0x65 or 0x66 or 0x67;
@@ -1624,9 +1639,8 @@ public partial class MainWindow : Window
             }
         }
 
-        // 邮件阅读：Ctrl+D → 标记垃圾并移出列表
-        if (!_inputFocused
-            && _tab == TabMode.Mail
+        // 邮件阅读：Ctrl+D → 标记垃圾（钩子未装时的后备；WebView 获焦时走钩子）
+        if (_tab == TabMode.Mail
             && _mailView == MailView.Read
             && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
             && e.Key == Key.D)
