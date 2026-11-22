@@ -28,10 +28,12 @@ namespace DeskWidgets;
 
 public partial class MainWindow : Window
 {
-    /// <summary>待办、邮件列表、大模型、文件、笔记窄态；网安/读书满屏。</summary>
+    /// <summary>待办、邮件列表、大模型、笔记窄态；网安/读书满屏。</summary>
     private const double PanelWidthDip = 320;
     /// <summary>笔记加宽 / 邮件详情·写信；网安/读书满屏时也作下限参考。</summary>
     private const double PanelWidthMailDip = 560;
+    /// <summary>文件搜索页：路径较长，比默认窄栏更宽。</summary>
+    private const double PanelWidthFileDip = 480;
     private const string WereadHomeUrl = "https://weread.qq.com/";
     private const int EdgeHitDip = 12;
     /// <summary>贴边需停留多久才展开，减少路过/滚轮时误触。</summary>
@@ -528,9 +530,10 @@ public partial class MainWindow : Window
     private double ActivePanelWidthDip => _tab switch
     {
         TabMode.Cyber or TabMode.Read => WideReadingWidthDip(),
-        // 邮件详情 / 写信略宽；笔记可选手动加宽；文件页与默认同宽（分区配置在搜索下方）
+        // 邮件详情 / 写信略宽；笔记可选手动加宽；文件页单独加宽
         TabMode.Mail when _mailView is MailView.Read or MailView.Compose => PanelWidthMailDip,
         TabMode.Note when _noteWide => PanelWidthMailDip,
+        TabMode.File => PanelWidthFileDip,
         _ => PanelWidthDip,
     };
 
@@ -2328,6 +2331,10 @@ public partial class MainWindow : Window
     private List<EverythingHit> _fileHits = new();
     private readonly List<DockPanel> _fileRows = new();
     private static readonly SolidColorBrush FileSelectedBrush = FreezeBrush(System.Windows.Media.Color.FromRgb(0xD6, 0xE8, 0xFF));
+    private static readonly SolidColorBrush FileFolderIconBrush = FreezeBrush(System.Windows.Media.Color.FromRgb(0xC9, 0x8A, 0x00));
+    private static readonly SolidColorBrush FileDocIconBrush = FreezeBrush(System.Windows.Media.Color.FromRgb(0x6B, 0x6B, 0x6B));
+    private static readonly System.Windows.Media.FontFamily FileGlyphFont =
+        new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
     private void FileSearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -2492,13 +2499,17 @@ public partial class MainWindow : Window
         foreach (var hit in hits)
         {
             var capture = hit;
-            var kind = new TextBlock
+            // E8B7 Folder / E8A5 Document（Segoe Fluent / MDL2）
+            var icon = new TextBlock
             {
-                Text = capture.IsFolder ? "目录" : "文件",
-                Width = 36,
-                FontSize = 11,
-                Foreground = (MediaBrush)FindResource("Muted"),
+                Text = capture.IsFolder ? "\uE8B7" : "\uE8A5",
+                FontFamily = FileGlyphFont,
+                FontSize = 15,
+                Width = 22,
+                Margin = new Thickness(0, 0, 8, 0),
+                Foreground = capture.IsFolder ? FileFolderIconBrush : FileDocIconBrush,
                 VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = capture.IsFolder ? "文件夹" : "文件",
             };
             var name = new TextBlock
             {
@@ -2523,8 +2534,8 @@ public partial class MainWindow : Window
                 Cursor = WpfCursors.Hand,
                 ToolTip = capture.FullPath,
             };
-            DockPanel.SetDock(kind, Dock.Left);
-            row.Children.Add(kind);
+            DockPanel.SetDock(icon, Dock.Left);
+            row.Children.Add(icon);
             row.Children.Add(textCol);
             row.MouseLeftButtonUp += (_, _) => OpenEverythingHit(capture);
             _fileRows.Add(row);
